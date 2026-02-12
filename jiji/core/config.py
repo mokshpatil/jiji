@@ -1,4 +1,4 @@
-# Protocol parameters for the Jiji blockchain
+# Protocol parameters for the jiji blockchain
 
 PROTOCOL_VERSION = 1
 

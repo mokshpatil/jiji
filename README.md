@@ -1,6 +1,6 @@
-# Jiji — Blockchain-Based Immutable Social Protocol
+# jiji — Blockchain-Based Immutable Social Protocol
 
-Jiji is a decentralized, blockchain-based social protocol where users publish
+jiji is a decentralized, blockchain-based social protocol where users publish
 signed posts to an immutable, append-only ledger. Identity is pseudonymous
 (cryptographic keypairs with no link to real-world identity). The protocol
 handles data integrity, ordering, and economic incentives. Presentation,
