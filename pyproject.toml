@@ -1,0 +1,15 @@
+[project]
+name = "jiji"
+version = "0.1.0"
+description = "Blockchain-based immutable social protocol"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=41.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["jiji*"]
