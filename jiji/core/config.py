@@ -32,6 +32,15 @@ GENESIS_DIFFICULTY = 1
 # PoW target ceiling (2^256 - 1)
 MAX_TARGET = (1 << 256) - 1
 
+# Networking
+DEFAULT_P2P_PORT = 9333
+DEFAULT_RPC_PORT = 9332
+MAX_PEERS = 50
+SYNC_BATCH_SIZE = 50
+PEER_EXCHANGE_INTERVAL = 60
+MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB
+HANDSHAKE_TIMEOUT = 10
+
 
 def block_reward(height: int) -> int:
     """Compute block reward for a given height using halving schedule."""
