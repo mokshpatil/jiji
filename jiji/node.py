@@ -214,6 +214,12 @@ class Node:
         logger.info("mining started")
         while self._running:
             try:
+                # wait for at least one pending transaction before mining
+                while self._running and self.mempool.size == 0:
+                    await asyncio.sleep(1)
+                if not self._running:
+                    break
+
                 template = self.miner.create_block_template()
                 block = await self._async_mine(template)
                 if block is None:
