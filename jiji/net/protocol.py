@@ -20,6 +20,8 @@ class MessageType(enum.IntEnum):
     BLOCK_RESPONSE = 8
     SYNC_REQUEST = 9
     SYNC_RESPONSE = 10
+    MEMPOOL_REQUEST = 11
+    MEMPOOL_RESPONSE = 12
 
 
 @dataclass
@@ -117,3 +119,11 @@ def make_sync_request(start_height: int, end_height: int) -> Message:
 
 def make_sync_response(blocks: list[dict]) -> Message:
     return Message(MessageType.SYNC_RESPONSE, {"blocks": blocks})
+
+
+def make_mempool_request() -> Message:
+    return Message(MessageType.MEMPOOL_REQUEST, {})
+
+
+def make_mempool_response(tx_hashes: list[str]) -> Message:
+    return Message(MessageType.MEMPOOL_RESPONSE, {"tx_hashes": tx_hashes})

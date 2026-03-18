@@ -63,6 +63,9 @@ class Node:
             logger.info(f"loaded chain from disk, height={self.chain.height}")
         elif genesis_block is not None:
             self.chain._apply_block(genesis_block)
+        elif self._bootstrap_peers:
+            # Will sync genesis from peers — don't create our own
+            logger.info("waiting to sync genesis from peers")
         else:
             self.chain.initialize_genesis(self.public_key)
         logger.info(f"chain initialized, height={self.chain.height}")
@@ -214,8 +217,8 @@ class Node:
         logger.info("mining started")
         while self._running:
             try:
-                # wait for at least one pending transaction before mining
-                while self._running and self.mempool.size == 0:
+                # wait for chain to be initialized and mempool to have transactions
+                while self._running and (self.chain.tip is None or self.mempool.size == 0):
                     await asyncio.sleep(1)
                 if not self._running:
                     break

@@ -25,8 +25,8 @@ class TestMessageType:
         values = [m.value for m in MessageType]
         assert len(values) == len(set(values))
 
-    def test_has_eleven_types(self):
-        assert len(MessageType) == 11
+    def test_has_thirteen_types(self):
+        assert len(MessageType) == 13
 
     def test_roundtrip_all_types(self):
         for mt in MessageType:

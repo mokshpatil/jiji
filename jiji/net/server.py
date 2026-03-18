@@ -25,6 +25,8 @@ from jiji.net.protocol import (
     make_peers_response,
     make_sync_request,
     make_sync_response,
+    make_mempool_request,
+    make_mempool_response,
     make_tx_announce,
     make_tx_request,
     make_tx_response,
@@ -145,9 +147,11 @@ class P2PServer:
 
     async def _peer_loop(self, peer: PeerConnection) -> None:
         try:
-            # if peer is ahead, sync
+            # if peer is ahead, sync blocks
             if peer.peer_height > self.node.chain.height:
                 await self._start_sync(peer)
+            # sync mempool from peer
+            await peer.send(make_mempool_request())
             while not peer.is_closed:
                 msg = await peer.receive()
                 if msg is None:
@@ -169,6 +173,8 @@ class P2PServer:
             MessageType.BLOCK_RESPONSE: self._on_block_response,
             MessageType.SYNC_REQUEST: self._on_sync_request,
             MessageType.SYNC_RESPONSE: self._on_sync_response,
+            MessageType.MEMPOOL_REQUEST: self._on_mempool_request,
+            MessageType.MEMPOOL_RESPONSE: self._on_mempool_response,
         }
         handler = handlers.get(msg.msg_type)
         if handler:
@@ -213,6 +219,24 @@ class P2PServer:
             await self.node.handle_new_transaction(tx_dict, source_peer=peer)
         except Exception as e:
             logger.debug(f"rejected tx from {peer.address}: {e}")
+
+    # -- Mempool sync --
+
+    async def _on_mempool_request(self, peer: PeerConnection, msg: Message) -> None:
+        pending = self.node.mempool.get_pending()
+        tx_hashes = [tx.tx_hash().hex() for tx in pending]
+        await peer.send(make_mempool_response(tx_hashes))
+
+    async def _on_mempool_response(self, peer: PeerConnection, msg: Message) -> None:
+        tx_hashes = msg.payload.get("tx_hashes", [])
+        for tx_hash_hex in tx_hashes:
+            if tx_hash_hex in self._seen_tx_hashes:
+                continue
+            tx_hash = bytes.fromhex(tx_hash_hex)
+            if tx_hash in self.node.mempool or tx_hash in self.node.chain.tx_index:
+                continue
+            # request the full transaction
+            await peer.send(make_tx_request(tx_hash_hex))
 
     # -- Block gossip --
 

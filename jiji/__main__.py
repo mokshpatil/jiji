@@ -132,9 +132,9 @@ def cmd_post(args: argparse.Namespace) -> None:
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
     priv, pub = load_or_generate_keypair(args.keyfile)
 
-    # Get current nonce
-    result = rpc_call(rpc_url, "get_account", {"pubkey": pub.hex()})
-    nonce = result.get("nonce", 0) if result.get("exists") else 0
+    # Get next nonce (accounts for pending txs in mempool)
+    result = rpc_call(rpc_url, "get_next_nonce", {"pubkey": pub.hex()})
+    nonce = result.get("nonce", 0)
 
     tx = Post(
         author=pub,
@@ -155,9 +155,9 @@ def cmd_transfer(args: argparse.Namespace) -> None:
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
     priv, pub = load_or_generate_keypair(args.keyfile)
 
-    # Get current nonce
-    result = rpc_call(rpc_url, "get_account", {"pubkey": pub.hex()})
-    nonce = result.get("nonce", 0) if result.get("exists") else 0
+    # Get next nonce (accounts for pending txs in mempool)
+    result = rpc_call(rpc_url, "get_next_nonce", {"pubkey": pub.hex()})
+    nonce = result.get("nonce", 0)
 
     tx = Transfer(
         sender=pub,

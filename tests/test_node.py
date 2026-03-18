@@ -100,6 +100,12 @@ class TestSingleNode:
         async def _test():
             node = await create_node(mine=True)
             try:
+                # submit a tx so the miner has something to mine
+                post = Post(author=node.public_key, nonce=0, timestamp=1000010,
+                            body="mine me", reply_to=None, gas_fee=1)
+                post.sign_tx(node.private_key)
+                await node.handle_new_transaction(post.to_dict())
+
                 # wait for at least one block to be mined
                 for _ in range(50):
                     if node.chain.height > 0:
@@ -164,6 +170,12 @@ class TestTwoNodes:
             genesis = node_a.chain.get_block_by_height(0)
             node_b = await create_node(genesis_block=genesis)
             try:
+                # submit a tx so node_a's miner has work
+                post = Post(author=node_a.public_key, nonce=0, timestamp=1000010,
+                            body="block gossip", reply_to=None, gas_fee=1)
+                post.sign_tx(node_a.private_key)
+                await node_a.handle_new_transaction(post.to_dict())
+
                 await node_b.p2p.connect_to_peer("127.0.0.1", p2p_port_a)
                 # wait for node_a to mine and node_b to receive
                 for _ in range(100):
@@ -179,11 +191,17 @@ class TestTwoNodes:
     def test_sync_on_connect(self):
         async def _test():
             node_a = await create_node(mine=True)
-            # let node_a mine a few blocks
-            for _ in range(100):
-                if node_a.chain.height >= 3:
-                    break
-                await asyncio.sleep(0.1)
+            # submit txs one at a time, waiting for each block
+            for i in range(3):
+                post = Post(author=node_a.public_key, nonce=i, timestamp=1000010 + i,
+                            body=f"sync {i}", reply_to=None, gas_fee=1)
+                post.sign_tx(node_a.private_key)
+                await node_a.handle_new_transaction(post.to_dict())
+                target = node_a.chain.height + 1
+                for _ in range(50):
+                    if node_a.chain.height >= target:
+                        break
+                    await asyncio.sleep(0.1)
             assert node_a.chain.height >= 3
 
             p2p_port_a = get_p2p_port(node_a)

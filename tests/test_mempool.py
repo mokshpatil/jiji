@@ -95,13 +95,28 @@ class TestMempoolAdd:
         with pytest.raises(ValidationError, match="signature"):
             pool.add(post)
 
-    def test_reject_wrong_nonce(self):
+    def test_future_nonce_queued(self):
         chain, priv, pub = setup_chain()
         pool = Mempool(chain)
-        post = Post(author=pub, nonce=99, timestamp=1000010, body="bad", reply_to=None, gas_fee=1)
+        post = Post(author=pub, nonce=99, timestamp=1000010, body="future", reply_to=None, gas_fee=1)
         post.sign_tx(priv)
-        with pytest.raises(ValidationError, match="nonce"):
-            pool.add(post)
+        pool.add(post)
+        # queued, not in active pool
+        assert pool.size == 0
+        assert post.tx_hash() not in pool
+
+    def test_reject_nonce_too_low(self):
+        chain, priv, pub = setup_chain()
+        pool = Mempool(chain)
+        # add nonce=0
+        post0 = Post(author=pub, nonce=0, timestamp=1000010, body="first", reply_to=None, gas_fee=1)
+        post0.sign_tx(priv)
+        pool.add(post0)
+        # try nonce=0 again (now expected is 1)
+        post_dup = Post(author=pub, nonce=0, timestamp=1000011, body="dup", reply_to=None, gas_fee=1)
+        post_dup.sign_tx(priv)
+        with pytest.raises(ValidationError, match="nonce too low"):
+            pool.add(post_dup)
 
     def test_reject_insufficient_balance(self):
         chain, priv, pub = setup_chain()

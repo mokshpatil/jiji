@@ -110,6 +110,7 @@ class RPCServer:
             "get_mempool": self._get_mempool,
             "get_merkle_proof": self._get_merkle_proof,
             "get_node_info": self._get_node_info,
+            "get_next_nonce": self._get_next_nonce,
         }
 
         handler = methods.get(method)
@@ -199,3 +200,7 @@ class RPCServer:
             "peer_count": len(self.node.p2p.peers) if self.node.p2p else 0,
             "mempool_size": self.node.mempool.size,
         }
+
+    async def _get_next_nonce(self, params: dict) -> dict:
+        pubkey = bytes.fromhex(params["pubkey"])
+        return {"nonce": self.node.mempool.next_nonce(pubkey)}
