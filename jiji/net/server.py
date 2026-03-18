@@ -8,6 +8,7 @@ from jiji.core.config import (
     DEFAULT_P2P_PORT,
     HANDSHAKE_TIMEOUT,
     MAX_PEERS,
+    MAX_REORG_DEPTH,
     PEER_EXCHANGE_INTERVAL,
     PROTOCOL_VERSION,
     SYNC_BATCH_SIZE,
@@ -224,10 +225,16 @@ class P2PServer:
         block_hash = bytes.fromhex(block_hash_hex)
         if self.node.chain.get_block_by_hash(block_hash) is not None:
             return
-        if height == self.node.chain.height + 1:
+        our_height = self.node.chain.height
+        if height == our_height + 1:
+            # Directly request this block (extends tip)
             await peer.send(make_block_request(block_hash=block_hash_hex))
-        elif height > self.node.chain.height + 1:
+        elif height > our_height + 1:
+            # Peer is significantly ahead — sync
             await self._start_sync(peer)
+        elif height >= our_height - MAX_REORG_DEPTH:
+            # Potential fork block within reorg window — fetch it
+            await peer.send(make_block_request(block_hash=block_hash_hex))
 
     async def _on_block_request(self, peer: PeerConnection, msg: Message) -> None:
         block = None
