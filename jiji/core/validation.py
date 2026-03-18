@@ -211,6 +211,65 @@ def compute_expected_difficulty(chain: Blockchain, height: int) -> int:
 # -- Block validation --
 
 
+def validate_block_structure(block: Block, parent: Block, current_time: int) -> None:
+    """Lightweight validation for a fork block. Checks structure without state.
+    Raises ValidationError if invalid.
+    """
+    header = block.header
+
+    # Version
+    if header.version != PROTOCOL_VERSION:
+        raise ValidationError(f"unsupported version: {header.version}")
+
+    # Height continuity
+    if header.height != parent.header.height + 1:
+        raise ValidationError(
+            f"height mismatch: got {header.height}, expected {parent.header.height + 1}"
+        )
+
+    # Previous hash linkage
+    if header.prev_hash != parent.block_hash():
+        raise ValidationError("prev_hash does not match parent")
+
+    # Timestamp: not too far in the future
+    if header.timestamp > current_time + MAX_FUTURE_TIMESTAMP:
+        raise ValidationError("timestamp too far in the future")
+
+    # Proof of work
+    if not block.meets_difficulty():
+        raise ValidationError("block does not meet difficulty target")
+
+    # Transaction count
+    if header.tx_count != len(block.transactions):
+        raise ValidationError("tx_count does not match transaction list")
+
+    # Must have at least the coinbase
+    if not block.transactions:
+        raise ValidationError("block has no transactions")
+
+    # First transaction must be coinbase
+    coinbase = block.transactions[0]
+    if not isinstance(coinbase, Coinbase):
+        raise ValidationError("first transaction must be coinbase")
+    validate_coinbase_format(coinbase, header.height)
+    if coinbase.recipient != header.miner:
+        raise ValidationError("coinbase recipient must match block miner")
+
+    # No other coinbase transactions allowed
+    for tx in block.transactions[1:]:
+        if isinstance(tx, Coinbase):
+            raise ValidationError("only one coinbase per block")
+
+    # Merkle root verification
+    expected_merkle = block.compute_tx_merkle_root()
+    if header.tx_merkle_root != expected_merkle:
+        raise ValidationError("tx_merkle_root mismatch")
+
+    # Block size limit
+    if block.serialized_size() > MAX_BLOCK_SIZE:
+        raise ValidationError("block exceeds maximum size")
+
+
 def validate_block(block: Block, chain: Blockchain, current_time: int) -> None:
     """Full block validation against the chain. Raises ValidationError."""
     header = block.header

@@ -32,6 +32,9 @@ GENESIS_DIFFICULTY = 1
 # PoW target ceiling (2^256 - 1)
 MAX_TARGET = (1 << 256) - 1
 
+# Chain reorganization
+MAX_REORG_DEPTH = 100
+
 # Networking
 DEFAULT_P2P_PORT = 9333
 DEFAULT_RPC_PORT = 9332
