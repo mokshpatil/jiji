@@ -122,6 +122,7 @@ class TestRPCDirect:
         rpc, node = make_rpc()
         result = dispatch(rpc, "get_account", {"pubkey": node.pub.hex()})
         assert "result" in result
+        assert result["result"]["exists"] is True
         assert result["result"]["balance"] == block_reward(0)
         assert result["result"]["nonce"] == 0
 
@@ -129,6 +130,7 @@ class TestRPCDirect:
         rpc, node = make_rpc()
         _, unknown = make_keys()
         result = dispatch(rpc, "get_account", {"pubkey": unknown.hex()})
+        assert result["result"]["exists"] is False
         assert result["result"]["balance"] == 0
         assert result["result"]["nonce"] == 0
 

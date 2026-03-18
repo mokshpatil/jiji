@@ -163,8 +163,8 @@ class RPCServer:
         pubkey = bytes.fromhex(params["pubkey"])
         account = self.node.chain.state.get_account(pubkey)
         if account is None:
-            return {"balance": 0, "nonce": 0}
-        return {"balance": account.balance, "nonce": account.nonce}
+            return {"exists": False, "balance": 0, "nonce": 0}
+        return {"exists": True, "balance": account.balance, "nonce": account.nonce}
 
     async def _get_latest_block(self, params: dict) -> dict:
         block = self.node.chain.tip
