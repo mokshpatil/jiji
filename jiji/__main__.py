@@ -172,6 +172,32 @@ def cmd_transfer(args: argparse.Namespace) -> None:
     print(f"submitted: {result.get('tx_hash', '')}")
 
 
+def cmd_viewblocks(args: argparse.Namespace) -> None:
+    """Display the latest N blocks and their transactions."""
+    rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
+    tip = rpc_call(rpc_url, "get_latest_block", {})
+    tip_height = tip["header"]["height"]
+
+    start = max(0, tip_height - args.n + 1)
+    for height in range(tip_height, start - 1, -1):
+        block = rpc_call(rpc_url, "get_block", {"height": height})
+        h = block["header"]
+        print(f"Block #{h['height']}  miner={h['miner'][:16]}...  time={h['timestamp']}  txs={h['tx_count']}")
+        for tx in block["transactions"]:
+            tx_type = tx.get("tx_type", "unknown")
+            if tx_type == "coinbase":
+                print(f"  [coinbase] recipient={tx['recipient'][:16]}...  amount={tx['amount']}")
+            elif tx_type == "post":
+                print(f"  [post]     author={tx['author'][:16]}...  body={tx['body'][:60]!r}")
+            elif tx_type == "transfer":
+                print(f"  [transfer] sender={tx['sender'][:16]}...  recipient={tx['recipient'][:16]}...  amount={tx['amount']}")
+            elif tx_type == "endorse":
+                print(f"  [endorse]  sender={tx['sender'][:16]}...  target={tx['target'][:16]}...")
+            else:
+                print(f"  [{tx_type}] {tx}")
+        print()
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show node status."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
@@ -257,6 +283,12 @@ def build_parser() -> argparse.ArgumentParser:
     node_p.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
+    # --- viewblocks ---
+    vb_p = subparsers.add_parser("viewblocks", parents=[rpc_flags],
+                                  help="Display latest N blocks and their transactions")
+    vb_p.add_argument("n", type=int, nargs="?", default=5, metavar="N",
+                      help="Number of blocks to show (default: 5)")
+
     # --- pubkey ---
     pk_p = subparsers.add_parser("pubkey", help="Derive public key from private key")
     pk_p.add_argument("--keyfile", default=None, metavar="FILE",
@@ -298,6 +330,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "viewblocks":
+        cmd_viewblocks(args)
+        return
 
     if args.command == "pubkey":
         cmd_pubkey(args)
