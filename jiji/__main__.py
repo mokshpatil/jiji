@@ -87,6 +87,18 @@ def rpc_call(rpc_url: str, method: str, params: dict) -> dict:
 # Subcommands
 # ---------------------------------------------------------------------------
 
+def cmd_pubkey(args: argparse.Namespace) -> None:
+    """Derive and print public key from a private key."""
+    if args.keyfile:
+        private_key = bytes.fromhex(open(args.keyfile).read().strip())
+    elif args.privkey:
+        private_key = bytes.fromhex(args.privkey)
+    else:
+        print("provide --keyfile or --privkey", file=sys.stderr)
+        sys.exit(1)
+    print(public_key_from_private(private_key).hex())
+
+
 def cmd_keygen(args: argparse.Namespace) -> None:
     """Generate a new keypair and save to file."""
     if args.keyfile and os.path.exists(args.keyfile):
@@ -245,6 +257,13 @@ def build_parser() -> argparse.ArgumentParser:
     node_p.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
+    # --- pubkey ---
+    pk_p = subparsers.add_parser("pubkey", help="Derive public key from private key")
+    pk_p.add_argument("--keyfile", default=None, metavar="FILE",
+                      help="Private key file (hex)")
+    pk_p.add_argument("--privkey", default=None, metavar="HEX",
+                      help="Private key as hex string")
+
     # --- keygen ---
     kg_p = subparsers.add_parser("keygen", help="Generate a new keypair")
     kg_p.add_argument("--keyfile", default=None, metavar="FILE",
@@ -279,6 +298,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "pubkey":
+        cmd_pubkey(args)
+        return
 
     if args.command == "keygen":
         cmd_keygen(args)
