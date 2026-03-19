@@ -183,6 +183,7 @@ def cmd_viewblocks(args: argparse.Namespace) -> None:
         block = rpc_call(rpc_url, "get_block", {"height": height})
         h = block["header"]
         print(f"Block #{h['height']}  miner={h['miner'][:16]}...  time={h['timestamp']}  txs={h['tx_count']}")
+        print(f"Difficulty: {h['difficulty']}")
         for tx in block["transactions"]:
             tx_type = tx.get("tx_type", "unknown")
             if tx_type == "coinbase":
