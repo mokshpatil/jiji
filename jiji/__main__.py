@@ -173,13 +173,15 @@ def cmd_transfer(args: argparse.Namespace) -> None:
 
 
 def cmd_viewblocks(args: argparse.Namespace) -> None:
-    """Display the latest N blocks and their transactions."""
+    """Display N blocks starting from a given height (default: latest)."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
     tip = rpc_call(rpc_url, "get_latest_block", {})
     tip_height = tip["header"]["height"]
 
-    start = max(0, tip_height - args.n + 1)
-    for height in range(tip_height, start - 1, -1):
+    top = args.start if args.start is not None else tip_height
+    top = min(top, tip_height)
+    bottom = max(0, top - args.n + 1)
+    for height in range(top, bottom - 1, -1):
         block = rpc_call(rpc_url, "get_block", {"height": height})
         h = block["header"]
         print(f"Block #{h['height']}  miner={h['miner'][:16]}...  time={h['timestamp']}  txs={h['tx_count']}")
@@ -286,9 +288,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- viewblocks ---
     vb_p = subparsers.add_parser("viewblocks", parents=[rpc_flags],
-                                  help="Display latest N blocks and their transactions")
+                                  help="Display N blocks from a given height")
     vb_p.add_argument("n", type=int, nargs="?", default=5, metavar="N",
                       help="Number of blocks to show (default: 5)")
+    vb_p.add_argument("--from", dest="start", type=int, default=None, metavar="HEIGHT",
+                      help="Start from this block height (default: latest)")
 
     # --- pubkey ---
     pk_p = subparsers.add_parser("pubkey", help="Derive public key from private key")
