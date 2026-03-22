@@ -4,6 +4,7 @@ import pytest
 from jiji.core.block import Block, BlockHeader
 from jiji.core.chain import Blockchain
 from jiji.core.config import GENESIS_DIFFICULTY, MAX_REORG_DEPTH, PROTOCOL_VERSION, block_reward
+from jiji.core.validation import compute_expected_difficulty
 from jiji.core.crypto import generate_keypair
 from jiji.core.merkle import merkle_root
 from jiji.core.state import WorldState
@@ -34,9 +35,10 @@ def build_block_on_chain(chain: Blockchain, txs: list, miner_pub: bytes, timesta
             working_authors[tx.tx_hash()] = tx.author
 
     tx_root = merkle_root([tx.tx_hash() for tx in all_txs])
+    difficulty = compute_expected_difficulty(chain, height)
     header = BlockHeader(
         PROTOCOL_VERSION, height, parent.block_hash(), timestamp,
-        miner_pub, GENESIS_DIFFICULTY, 0, tx_root, working.state_root(),
+        miner_pub, difficulty, 0, tx_root, working.state_root(),
         len(all_txs),
     )
     block = Block(header=header, transactions=all_txs)

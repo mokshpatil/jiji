@@ -48,7 +48,7 @@ class Node:
         self.chain = Blockchain(store=self._store)
         self.mempool = Mempool(self.chain)
         self.miner = Miner(self.chain, self.mempool, self.public_key)
-        self.p2p = P2PServer(self, p2p_host, p2p_port)
+        self.p2p = P2PServer(self, p2p_host, p2p_port, data_dir=data_dir)
         self.rpc = RPCServer(self, rpc_host, rpc_port)
         self._mine = mine
         self._bootstrap_peers = bootstrap_peers or []
@@ -73,8 +73,17 @@ class Node:
         await self.p2p.start()
         await self.rpc.start()
 
+        # Load saved peers from disk
+        self.p2p.load_peers()
+
         for host, port in self._bootstrap_peers:
             asyncio.create_task(self.p2p.connect_to_peer(host, port))
+
+        # Also try connecting to previously known peers (sorted by freshness)
+        saved = sorted(self.p2p.known_addresses.items(), key=lambda x: x[1], reverse=True)
+        for addr, _ in saved:
+            if addr not in [(h, p) for h, p in self._bootstrap_peers]:
+                asyncio.create_task(self.p2p.connect_to_peer(*addr))
 
         asyncio.create_task(self.p2p.peer_exchange_loop())
 
@@ -93,6 +102,7 @@ class Node:
                 await self._mining_task
             except asyncio.CancelledError:
                 pass
+        self.p2p.save_peers()
         await self.p2p.stop()
         await self.rpc.stop()
         if self._store is not None:
@@ -191,7 +201,7 @@ class Node:
         logger.debug(
             f"block {block_hash_hex[:16]} has unknown parent, height={block.header.height}"
         )
-        if source_peer is not None:
+        if source_peer is not None and not self.p2p._syncing:
             asyncio.create_task(self.p2p._start_sync(source_peer))
 
     def _recycle_orphaned_transactions(self, orphaned_blocks: list[Block]) -> None:
@@ -217,12 +227,13 @@ class Node:
         logger.info("mining started")
         while self._running:
             try:
-                # wait for chain to be initialized and mempool to have transactions
-                while self._running and (self.chain.tip is None or self.mempool.size == 0):
+                # wait for chain to be initialized
+                while self._running and self.chain.tip is None:
                     await asyncio.sleep(1)
                 if not self._running:
                     break
 
+                has_txs = self.mempool.size > 0
                 template = self.miner.create_block_template()
                 block = await self._async_mine(template)
                 if block is None:
@@ -236,6 +247,10 @@ class Node:
                 bh = block.block_hash().hex()
                 logger.info(f"mined block {bh[:16]}... height={block.header.height}")
                 await self.p2p.broadcast_block(bh, block.header.height)
+                # After mining an empty block, wait before mining the next one
+                # to avoid flooding the chain at low difficulty
+                if not has_txs:
+                    await asyncio.sleep(5)
             except ValidationError as e:
                 logger.warning(f"mined block rejected: {e}")
             except asyncio.CancelledError:

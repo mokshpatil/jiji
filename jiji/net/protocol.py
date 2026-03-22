@@ -64,9 +64,10 @@ def decode_message(data: bytes) -> Message:
 # -- Factory functions --
 
 
-def make_handshake(version: int, height: int, genesis_hash: str) -> Message:
+def make_handshake(version: int, height: int, genesis_hash: str, listen_port: int = 0) -> Message:
     return Message(MessageType.HANDSHAKE, {
         "version": version, "height": height, "genesis_hash": genesis_hash,
+        "listen_port": listen_port,
     })
 
 

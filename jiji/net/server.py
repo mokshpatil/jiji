@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import time
 from typing import TYPE_CHECKING
 
 from jiji.core.config import (
@@ -9,7 +12,10 @@ from jiji.core.config import (
     HANDSHAKE_TIMEOUT,
     MAX_PEERS,
     MAX_REORG_DEPTH,
+    MAX_SAVED_PEERS,
+    PEER_EXCHANGE_INITIAL_DELAY,
     PEER_EXCHANGE_INTERVAL,
+    PEER_MAX_AGE,
     PROTOCOL_VERSION,
     SYNC_BATCH_SIZE,
 )
@@ -41,12 +47,15 @@ logger = logging.getLogger(__name__)
 class P2PServer:
     """Manages peer connections, gossip, and chain sync."""
 
-    def __init__(self, node: Node, host: str = "0.0.0.0", port: int = DEFAULT_P2P_PORT):
+    def __init__(self, node: Node, host: str = "0.0.0.0", port: int = DEFAULT_P2P_PORT,
+                 data_dir: str | None = None):
         self.node = node
         self.host = host
         self.port = port
+        self.data_dir = data_dir
         self.peers: dict[tuple[str, int], PeerConnection] = {}
-        self.known_addresses: set[tuple[str, int]] = set()
+        # addr -> last_seen timestamp
+        self.known_addresses: dict[tuple[str, int], float] = {}
         self._server: asyncio.Server | None = None
         self._syncing = False
         self._seen_tx_hashes: set[str] = set()
@@ -71,8 +80,10 @@ class P2PServer:
     # -- Connection management --
 
     async def connect_to_peer(self, host: str, port: int) -> bool:
-        if (host, port) in self.peers:
-            return True
+        # Check if already connected to this listen address
+        for p in self.peers.values():
+            if p.host == host and p.listen_port == port:
+                return True
         if len(self.peers) >= MAX_PEERS:
             return False
         try:
@@ -84,6 +95,7 @@ class P2PServer:
             await self._perform_handshake(peer)
             if peer.handshake_done:
                 self.peers[peer.address] = peer
+                self.known_addresses[(host, peer.listen_port)] = time.time()
                 asyncio.create_task(self._peer_loop(peer))
                 logger.info(f"connected to peer {host}:{port}")
                 return True
@@ -112,6 +124,8 @@ class P2PServer:
             await self._send_handshake(peer)
             peer.handshake_done = True
             self.peers[peer.address] = peer
+            if peer.listen_port > 0:
+                self.known_addresses[(host, peer.listen_port)] = time.time()
             logger.info(f"inbound peer connected: {host}:{port}")
             asyncio.create_task(self._peer_loop(peer))
         except asyncio.TimeoutError:
@@ -135,13 +149,16 @@ class P2PServer:
     async def _send_handshake(self, peer: PeerConnection) -> None:
         genesis = self.node.chain.get_block_by_height(0)
         genesis_hash = genesis.block_hash().hex() if genesis else ""
-        msg = make_handshake(PROTOCOL_VERSION, self.node.chain.height, genesis_hash)
+        msg = make_handshake(PROTOCOL_VERSION, self.node.chain.height, genesis_hash, self.port)
         await peer.send(msg)
 
     def _process_handshake(self, peer: PeerConnection, msg: Message) -> None:
         peer.version = msg.payload.get("version")
         peer.peer_height = msg.payload.get("height", -1)
         peer.genesis_hash = msg.payload.get("genesis_hash")
+        lp = msg.payload.get("listen_port", 0)
+        if lp > 0:
+            peer.listen_port = lp
 
     # -- Message loop --
 
@@ -183,13 +200,19 @@ class P2PServer:
     # -- Peers --
 
     async def _on_peers_request(self, peer: PeerConnection, msg: Message) -> None:
-        addrs = [(h, p) for (h, p) in self.peers.keys() if (h, p) != peer.address]
+        # Share listen addresses (not ephemeral connection ports)
+        addrs = []
+        for p in self.peers.values():
+            if p is not peer and not p.is_closed:
+                addrs.append((p.host, p.listen_port))
         await peer.send(make_peers_response(addrs))
 
     async def _on_peers_response(self, peer: PeerConnection, msg: Message) -> None:
+        now = time.time()
         for entry in msg.payload.get("peers", []):
             addr = (entry["host"], entry["port"])
-            self.known_addresses.add(addr)
+            if addr not in self.known_addresses:
+                self.known_addresses[addr] = now
 
     # -- Transaction gossip --
 
@@ -343,12 +366,84 @@ class P2PServer:
 
     # -- Peer exchange background task --
 
+    def _is_connected_to(self, host: str, port: int) -> bool:
+        """Check if we're already connected to a peer at this listen address."""
+        if host == self.host and port == self.port:
+            return True  # that's us
+        if host in ("0.0.0.0", "127.0.0.1", "localhost") and port == self.port:
+            return True  # that's us
+        for p in self.peers.values():
+            if p.host == host and p.listen_port == port:
+                return True
+        return False
+
     async def peer_exchange_loop(self) -> None:
+        # First exchange fires quickly so peers discover each other fast
+        await asyncio.sleep(PEER_EXCHANGE_INITIAL_DELAY)
         while True:
-            await asyncio.sleep(PEER_EXCHANGE_INTERVAL)
             for peer in list(self.peers.values()):
                 if not peer.is_closed:
                     await peer.send(make_peers_request())
+            # Short delay to let responses arrive before connecting
+            await asyncio.sleep(2)
             for addr in list(self.known_addresses):
-                if addr not in self.peers and len(self.peers) < MAX_PEERS:
+                if not self._is_connected_to(*addr) and len(self.peers) < MAX_PEERS:
                     asyncio.create_task(self.connect_to_peer(*addr))
+            self.save_peers()
+            await asyncio.sleep(PEER_EXCHANGE_INTERVAL)
+
+    # -- Peer persistence --
+
+    def _peers_path(self) -> str | None:
+        if self.data_dir is None:
+            return None
+        return os.path.join(self.data_dir, "peers.json")
+
+    def load_peers(self) -> None:
+        """Load saved peers from disk into known_addresses."""
+        path = self._peers_path()
+        if path is None or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r") as f:
+                entries = json.load(f)
+            now = time.time()
+            loaded = 0
+            for entry in entries:
+                last_seen = entry.get("last_seen", 0)
+                if now - last_seen > PEER_MAX_AGE:
+                    continue
+                addr = (entry["host"], entry["port"])
+                if addr not in self.known_addresses:
+                    self.known_addresses[addr] = last_seen
+                    loaded += 1
+            if loaded:
+                logger.info(f"loaded {loaded} saved peers from {path}")
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning(f"failed to load peers from {path}: {e}")
+
+    def save_peers(self) -> None:
+        """Save known_addresses to disk atomically."""
+        path = self._peers_path()
+        if path is None:
+            return
+        # Also update last_seen for currently connected peers
+        now = time.time()
+        for peer in self.peers.values():
+            if not peer.is_closed and peer.listen_port > 0:
+                self.known_addresses[(peer.host, peer.listen_port)] = now
+        # Sort by last_seen descending, cap at MAX_SAVED_PEERS
+        entries = sorted(
+            self.known_addresses.items(), key=lambda x: x[1], reverse=True,
+        )[:MAX_SAVED_PEERS]
+        data = [
+            {"host": addr[0], "port": addr[1], "last_seen": ts}
+            for addr, ts in entries
+        ]
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, path)
+        except OSError as e:
+            logger.warning(f"failed to save peers: {e}")

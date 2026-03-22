@@ -28,6 +28,7 @@ class PeerConnection:
         self.version: int | None = None
         self.peer_height: int = -1
         self.genesis_hash: str | None = None
+        self.listen_port: int = port  # defaults to connection port, updated by handshake
         self.handshake_done = False
         self._closed = False
 
