@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Jiji Explorer</title>
+
+  <style>
+    body {
+      font-family: Arial;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 20px;
+      max-width: 700px;
+      margin: auto;
+    }
+
+    h1 {
+      text-align: center;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .tab {
+      padding: 10px 15px;
+      background: #1e293b;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .tab.active {
+      background: #38bdf8;
+      color: black;
+    }
+
+    .card {
+      background: #1e293b;
+      padding: 15px;
+      margin-bottom: 15px;
+      border-radius: 10px;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+
+    button {
+      margin-bottom: 20px;
+      padding: 10px;
+      background: #38bdf8;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body>
+
+<h1>Jiji Feed</h1>
+
+<div class="tabs">
+  <div class="tab active" onclick="setTab('posts')">Posts</div>
+  <div class="tab" onclick="setTab('transfers')">Transfers</div>
+  <div class="tab" onclick="setTab('all')">All</div>
+</div>
+
+<button onclick="loadData()">Refresh</button>
+
+<div id="feed"></div>
+
+<script>
+const RPC_URL = "http://127.0.0.1:9332";
+
+let currentTab = "posts";
+
+function setTab(tab) {
+  currentTab = tab;
+
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  event.target.classList.add("active");
+
+  loadData();
+}
+
+async function rpc(method, params = {}) {
+  const res = await fetch(RPC_URL, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      method,
+      params,
+      id: 1
+    })
+  });
+
+  const data = await res.json();
+  return data.result;
+}
+
+async function loadData() {
+  const feed = document.getElementById("feed");
+  feed.innerHTML = "Loading...";
+
+  try {
+    const latest = await rpc("get_latest_block");
+    const height = latest.header.height;
+
+    let items = [];
+
+    for (let i = height; i > height - 2000 && i >= 0; i--) {
+      const block = await rpc("get_block", { height: i });
+
+      const txs = block.transactions || [];
+
+      txs.forEach(tx => {
+        const type = tx.tx_type || "unknown";
+
+        // FILTER BASED ON TAB
+        if (currentTab === "posts" && type !== "post" && !tx.body) return;
+        if (currentTab === "transfers" && type !== "transfer") return;
+
+        items.push({
+          ...tx,
+          blockHeight: block.header.height,
+          timestamp: block.header.timestamp
+        });
+      });
+    }
+
+    // sort newest first
+    items.sort((a, b) => b.timestamp - a.timestamp);
+
+    feed.innerHTML = "";
+
+    items.forEach(item => {
+      const div = document.createElement("div");
+      div.className = "card";
+
+      let content = "";
+
+      if (item.tx_type === "post" || item.body) {
+        content = `
+          <b>Post</b>
+          <p>${item.body}</p>
+          <div class="meta">
+            ${item.author?.slice(0,12)}...
+          </div>
+        `;
+      }
+
+      else if (item.tx_type === "transfer") {
+        content = `
+          <b>Transfer</b>
+          <p>${item.amount} tokens</p>
+          <div class="meta">
+            to ${item.recipient?.slice(0,12)}...
+          </div>
+        `;
+      }
+
+      else if (item.tx_type === "coinbase") {
+        content = `
+          <b>Mining Reward</b>
+          <p>${item.amount}</p>
+        `;
+      }
+
+      else {
+        content = `<pre>${JSON.stringify(item, null, 2)}</pre>`;
+      }
+
+      div.innerHTML = `
+        ${content}
+        <div class="meta">
+          block #${item.blockHeight} • 
+          ${new Date(item.timestamp * 1000).toLocaleString()}
+        </div>
+      `;
+
+      feed.appendChild(div);
+    });
+
+    if (items.length === 0) {
+      feed.innerHTML = "Nothing here yet...";
+    }
+
+  } catch (err) {
+    feed.innerHTML = "Error loading data";
+    console.error(err);
+  }
+}
+</script>
+
+</body>
+</html>
