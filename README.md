@@ -18,6 +18,26 @@ applications that anyone can build.
 
 ---
 
+## Quickstart
+
+```bash
+# Generate a key and launch a mining node accessible on your LAN.
+# --lan binds RPC to 0.0.0.0, auto-generates a bearer token at
+# <data-dir>/rpc_token, sets CORS allow-origin=*, and enables mDNS
+# peer discovery.
+jiji keygen --keyfile ~/.jiji/key
+jiji node --lan --mine --keyfile ~/.jiji/key --data-dir ~/.jiji/data
+
+# In another terminal, serve the reference web client.
+cd frontend && python3 -m http.server 8080
+```
+
+Open `http://127.0.0.1:8080`, create/import a wallet in the browser, and
+paste the RPC URL + bearer token from the node. See [`frontend/README.md`](frontend/README.md)
+for details.
+
+---
+
 ## Table of Contents
 
 1. [Identity Model](#1-identity-model)
@@ -115,6 +135,8 @@ Estimated size: ~450-700 bytes per post transaction.
 **Validation rules:**
 - `target` must reference an existing post (not an endorsement or transfer)
 - `amount` must be <= sender's balance minus gas_fee
+- An author may **not** endorse their own post. Self-endorsement is rejected
+  at mempool admission and at block validation, gated on `HARDFORK_HEIGHT`.
 - One account may endorse the same post multiple times (each is a separate
   transaction with its own cost)
 
@@ -346,6 +368,9 @@ Nodes maintain a peer list. Discovery mechanisms:
 - **Bootstrap nodes**: hardcoded addresses of well-known nodes that new nodes
   connect to first
 - **Peer exchange**: nodes share their peer lists with each other periodically
+- **mDNS / DNS-SD** (`_jiji._tcp.local.`): zero-config LAN discovery, enabled
+  by `--lan` or `--mdns`. Advertisements carry a short genesis-hash prefix so
+  nodes on different chains don't accidentally peer.
 - **DNS seeds** (optional, for production): DNS records that resolve to active
   node addresses
 
@@ -559,7 +584,28 @@ None of this affects the protocol.
 
 ### Eclipse Attack
 - An attacker surrounds a node with malicious peers, feeding it a fake chain
-- Mitigation: connect to diverse peers, use bootstrap nodes, verify PoW
+- Mitigation: connect to diverse peers, use bootstrap nodes, verify PoW,
+  separate inbound/outbound connection caps (see `MAX_INBOUND`/`MAX_OUTBOUND`)
+
+### Peer Abuse & Rate Limiting
+- **Per-peer message rate**: token bucket on every inbound connection
+  (`PEER_MSG_PER_SEC`, burst `PEER_MSG_BURST`); over-limit messages are
+  dropped without disconnecting.
+- **Per-IP inbound connection rate**: sliding window of
+  `INBOUND_CONN_PER_MIN` opens per `/32`.
+- **RPC**: per-IP `RPC_REQ_PER_MIN` budget; 429 on overrun.
+- **Peer scoring**: misbehavior (bad signatures, bad handshake, invalid
+  blocks) accumulates a score; crossing the threshold bans the IP for
+  `BAN_DURATION`. Bans persist to `<data-dir>/bans.json`.
+- **Escape hatches** for trusted networks: `--no-rate-limit`,
+  `--trust-ip <CIDR>`.
+
+### RPC Authentication
+- When the RPC binds to anything other than loopback, a bearer token is
+  required on every request (`Authorization: Bearer <hex>`).
+- `--lan` auto-generates a 32-byte token, persists it to
+  `<data-dir>/rpc_token`, and sets `Access-Control-Allow-Origin: *` so the
+  reference web client can call the node directly from a browser.
 
 ### Transaction Replay
 - Nonce field prevents replay: each transaction from an account has a unique
