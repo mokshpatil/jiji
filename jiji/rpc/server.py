@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
+import time
+from collections import deque
+from ipaddress import ip_address, ip_network
 from typing import TYPE_CHECKING
 
-from jiji.core.config import DEFAULT_RPC_PORT
+from jiji.core.config import DEFAULT_RPC_PORT, RPC_REQ_PER_MIN
 from jiji.core.merkle import merkle_proof
 from jiji.core.transaction import transaction_from_dict
 
@@ -16,12 +20,31 @@ logger = logging.getLogger(__name__)
 
 
 class RPCServer:
-    """Minimal async HTTP server implementing JSON-RPC 2.0."""
+    """Minimal async HTTP server implementing JSON-RPC 2.0.
 
-    def __init__(self, node: Node, host: str = "127.0.0.1", port: int = DEFAULT_RPC_PORT):
+    When `auth_token` is set, requests must carry a matching
+    `Authorization: Bearer <token>` header. When `allow_origin` is set,
+    CORS headers are emitted and `OPTIONS` preflight requests return 204.
+    """
+
+    def __init__(
+        self,
+        node: Node,
+        host: str = "127.0.0.1",
+        port: int = DEFAULT_RPC_PORT,
+        auth_token: str | None = None,
+        allow_origin: str | None = None,
+        rate_limit: bool = True,
+        trusted_cidrs: tuple[str, ...] = (),
+    ):
         self.node = node
         self.host = host
         self.port = port
+        self.auth_token = auth_token
+        self.allow_origin = allow_origin
+        self.rate_limit = rate_limit
+        self._trusted = [ip_network(c, strict=False) for c in trusted_cidrs]
+        self._req_log: dict[str, deque[float]] = {}
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -35,10 +58,36 @@ class RPCServer:
             self._server.close()
             await self._server.wait_closed()
 
+    def _is_trusted(self, ip: str) -> bool:
+        if not self._trusted:
+            return False
+        try:
+            addr = ip_address(ip)
+        except ValueError:
+            return False
+        return any(addr in net for net in self._trusted)
+
+    def _rate_limit_ok(self, ip: str) -> bool:
+        """Per-IP sliding-window cap on RPC requests."""
+        if not self.rate_limit or self._is_trusted(ip):
+            return True
+        now = time.monotonic()
+        log = self._req_log.setdefault(ip, deque())
+        cutoff = now - 60
+        while log and log[0] < cutoff:
+            log.popleft()
+        if len(log) >= RPC_REQ_PER_MIN:
+            return False
+        log.append(now)
+        return True
+
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> None:
         try:
+            peer_addr = writer.get_extra_info("peername")
+            peer_ip = peer_addr[0] if peer_addr else ""
+
             # read HTTP request headers
             raw = b""
             while b"\r\n\r\n" not in raw:
@@ -48,13 +97,45 @@ class RPCServer:
                 raw += chunk
 
             header_part, _, body_start = raw.partition(b"\r\n\r\n")
-            headers = header_part.decode("utf-8", errors="replace")
+            headers_text = header_part.decode("utf-8", errors="replace")
+            header_lines = headers_text.split("\r\n")
+            request_line = header_lines[0] if header_lines else ""
+            method_verb = request_line.split(" ", 1)[0].upper() if request_line else ""
 
-            # parse Content-Length
+            # CORS preflight short-circuit — no auth or rate limit on OPTIONS.
+            if method_verb == "OPTIONS":
+                await self._send_preflight(writer)
+                return
+
+            if not self._rate_limit_ok(peer_ip):
+                await self._send_http(
+                    writer,
+                    self._error_response(None, -32002, "Too Many Requests"),
+                    status_code=429,
+                )
+                return
+
+            auth_header = ""
             content_length = 0
-            for line in headers.split("\r\n"):
-                if line.lower().startswith("content-length:"):
-                    content_length = int(line.split(":", 1)[1].strip())
+            for line in header_lines:
+                lower = line.lower()
+                if lower.startswith("content-length:"):
+                    try:
+                        content_length = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        content_length = 0
+                elif lower.startswith("authorization:"):
+                    auth_header = line.split(":", 1)[1].strip()
+
+            if self.auth_token is not None:
+                expected = f"Bearer {self.auth_token}"
+                if not _constant_time_equals(auth_header, expected):
+                    await self._send_http(
+                        writer,
+                        self._error_response(None, -32001, "Unauthorized"),
+                        status_code=401,
+                    )
+                    return
 
             # read remaining body
             body = body_start
@@ -84,17 +165,39 @@ class RPCServer:
             except (ConnectionError, OSError):
                 pass
 
-    async def _send_http(self, writer: asyncio.StreamWriter, body: dict) -> None:
+    async def _send_http(
+        self, writer: asyncio.StreamWriter, body: dict, status_code: int = 200,
+    ) -> None:
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        http_response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: application/json\r\n"
-            b"Content-Length: " + str(len(body_bytes)).encode() + b"\r\n"
-            b"Connection: close\r\n"
-            b"\r\n" + body_bytes
-        )
-        writer.write(http_response)
+        status_line = f"HTTP/1.1 {status_code} {_http_reason(status_code)}\r\n".encode()
+        headers = [
+            status_line,
+            b"Content-Type: application/json\r\n",
+            b"Content-Length: " + str(len(body_bytes)).encode() + b"\r\n",
+            b"Connection: close\r\n",
+        ]
+        headers.extend(self._cors_header_lines())
+        headers.append(b"\r\n")
+        writer.write(b"".join(headers) + body_bytes)
         await writer.drain()
+
+    async def _send_preflight(self, writer: asyncio.StreamWriter) -> None:
+        headers = [b"HTTP/1.1 204 No Content\r\n", b"Connection: close\r\n"]
+        headers.extend(self._cors_header_lines())
+        headers.append(b"\r\n")
+        writer.write(b"".join(headers))
+        await writer.drain()
+
+    def _cors_header_lines(self) -> list[bytes]:
+        if self.allow_origin is None:
+            return []
+        origin = self.allow_origin.encode("utf-8")
+        return [
+            b"Access-Control-Allow-Origin: " + origin + b"\r\n",
+            b"Access-Control-Allow-Methods: POST, OPTIONS\r\n",
+            b"Access-Control-Allow-Headers: Authorization, Content-Type\r\n",
+            b"Access-Control-Max-Age: 600\r\n",
+        ]
 
     async def _dispatch(self, request: dict) -> dict:
         req_id = request.get("id")
@@ -204,3 +307,19 @@ class RPCServer:
     async def _get_next_nonce(self, params: dict) -> dict:
         pubkey = bytes.fromhex(params["pubkey"])
         return {"nonce": self.node.mempool.next_nonce(pubkey)}
+
+
+_HTTP_REASONS = {
+    200: "OK",
+    204: "No Content",
+    401: "Unauthorized",
+    429: "Too Many Requests",
+}
+
+
+def _http_reason(status: int) -> str:
+    return _HTTP_REASONS.get(status, "OK")
+
+
+def _constant_time_equals(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))

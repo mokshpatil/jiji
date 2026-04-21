@@ -5,11 +5,15 @@ import json
 import logging
 import os
 import time
+from collections import OrderedDict, deque
 from typing import TYPE_CHECKING
 
 from jiji.core.config import (
     DEFAULT_P2P_PORT,
     HANDSHAKE_TIMEOUT,
+    INBOUND_CONN_PER_MIN,
+    MAX_INBOUND,
+    MAX_OUTBOUND,
     MAX_PEERS,
     MAX_REORG_DEPTH,
     MAX_SAVED_PEERS,
@@ -17,9 +21,12 @@ from jiji.core.config import (
     PEER_EXCHANGE_INTERVAL,
     PEER_MAX_AGE,
     PROTOCOL_VERSION,
+    SEEN_SET_FLUSH_INTERVAL,
+    SEEN_SET_MAX,
     SYNC_BATCH_SIZE,
 )
 from jiji.net.peer import PeerConnection
+from jiji.net.scoring import PeerScorer
 from jiji.net.protocol import (
     MessageType,
     Message,
@@ -47,35 +54,94 @@ logger = logging.getLogger(__name__)
 class P2PServer:
     """Manages peer connections, gossip, and chain sync."""
 
-    def __init__(self, node: Node, host: str = "0.0.0.0", port: int = DEFAULT_P2P_PORT,
-                 data_dir: str | None = None):
+    def __init__(
+        self,
+        node: Node,
+        host: str = "0.0.0.0",
+        port: int = DEFAULT_P2P_PORT,
+        data_dir: str | None = None,
+        rate_limit: bool = True,
+        trusted_cidrs: tuple[str, ...] = (),
+    ):
         self.node = node
         self.host = host
         self.port = port
         self.data_dir = data_dir
+        self.rate_limit = rate_limit
         self.peers: dict[tuple[str, int], PeerConnection] = {}
         # addr -> last_seen timestamp
         self.known_addresses: dict[tuple[str, int], float] = {}
         self._server: asyncio.Server | None = None
         self._syncing = False
-        self._seen_tx_hashes: set[str] = set()
-        self._seen_block_hashes: set[str] = set()
+        # Use OrderedDicts as LRUs so oldest entries are evicted first.
+        self._seen_tx_hashes: OrderedDict[str, None] = OrderedDict()
+        self._seen_block_hashes: OrderedDict[str, None] = OrderedDict()
+        # Inbound connection timestamps per /32 for sliding-window rate limit.
+        self._inbound_attempts: dict[str, deque[float]] = {}
+        self.scorer = PeerScorer(
+            data_dir=data_dir,
+            trusted_cidrs=trusted_cidrs,
+            disabled=not rate_limit,
+        )
+        self._seen_flush_task: asyncio.Task | None = None
 
     # -- Lifecycle --
 
     async def start(self) -> None:
+        self.load_seen()
         self._server = await asyncio.start_server(
             self._handle_inbound, self.host, self.port,
         )
+        if self.data_dir is not None:
+            self._seen_flush_task = asyncio.create_task(self._seen_flush_loop())
         logger.info(f"P2P server listening on {self.host}:{self.port}")
 
     async def stop(self) -> None:
+        if self._seen_flush_task is not None:
+            self._seen_flush_task.cancel()
+            try:
+                await self._seen_flush_task
+            except asyncio.CancelledError:
+                pass
+        self.save_seen()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
         for peer in list(self.peers.values()):
             await peer.close()
         self.peers.clear()
+
+    # -- Seen-set helpers (bounded LRU) --
+
+    def _seen_add(self, store: OrderedDict[str, None], key: str) -> None:
+        if key in store:
+            store.move_to_end(key)
+            return
+        store[key] = None
+        while len(store) > SEEN_SET_MAX:
+            store.popitem(last=False)
+
+    @property
+    def _inbound_count(self) -> int:
+        return sum(1 for p in self.peers.values() if p.inbound)
+
+    @property
+    def _outbound_count(self) -> int:
+        return sum(1 for p in self.peers.values() if not p.inbound)
+
+    def _inbound_rate_ok(self, ip: str) -> bool:
+        """Per-/32 sliding-window cap on inbound connection opens."""
+        if not self.rate_limit or self.scorer.is_trusted(ip):
+            return True
+        now = time.monotonic()
+        window = self._inbound_attempts.setdefault(ip, deque())
+        cutoff = now - 60
+        while window and window[0] < cutoff:
+            window.popleft()
+        if len(window) >= INBOUND_CONN_PER_MIN:
+            return False
+        window.append(now)
+        return True
 
     # -- Connection management --
 
@@ -84,14 +150,20 @@ class P2PServer:
         for p in self.peers.values():
             if p.host == host and p.listen_port == port:
                 return True
-        if len(self.peers) >= MAX_PEERS:
+        if self.scorer.is_banned(host):
+            logger.debug(f"refusing outbound to banned {host}:{port}")
+            return False
+        if self._outbound_count >= MAX_OUTBOUND:
             return False
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
                 timeout=HANDSHAKE_TIMEOUT,
             )
-            peer = PeerConnection(reader, writer, host, port, inbound=False)
+            peer = PeerConnection(
+                reader, writer, host, port,
+                inbound=False, rate_limit=self.rate_limit,
+            )
             await self._perform_handshake(peer)
             if peer.handshake_done:
                 self.peers[peer.address] = peer
@@ -111,16 +183,35 @@ class P2PServer:
     ) -> None:
         addr = writer.get_extra_info("peername")
         host, port = addr[0], addr[1]
-        if len(self.peers) >= MAX_PEERS:
+        if self.scorer.is_banned(host):
+            logger.debug(f"rejecting inbound from banned {host}")
             writer.close()
             return
-        peer = PeerConnection(reader, writer, host, port, inbound=True)
+        if not self._inbound_rate_ok(host):
+            logger.debug(f"inbound rate limit hit for {host}")
+            writer.close()
+            return
+        if self._inbound_count >= MAX_INBOUND:
+            writer.close()
+            return
+        peer = PeerConnection(
+            reader, writer, host, port,
+            inbound=True, rate_limit=self.rate_limit,
+        )
         try:
             msg = await asyncio.wait_for(peer.receive(), timeout=HANDSHAKE_TIMEOUT)
             if msg is None or msg.msg_type != MessageType.HANDSHAKE:
+                self.scorer.record(host, "bad_handshake")
                 await peer.close()
                 return
             self._process_handshake(peer, msg)
+            # Reject wrong-genesis inbounds before we accept them.
+            our_genesis = self.node.chain.get_block_by_height(0)
+            if (our_genesis is not None and peer.genesis_hash and
+                    peer.genesis_hash != our_genesis.block_hash().hex()):
+                self.scorer.record(host, "bad_handshake")
+                await peer.close()
+                return
             await self._send_handshake(peer)
             peer.handshake_done = True
             self.peers[peer.address] = peer
@@ -137,12 +228,14 @@ class P2PServer:
         await self._send_handshake(peer)
         msg = await asyncio.wait_for(peer.receive(), timeout=HANDSHAKE_TIMEOUT)
         if msg is None or msg.msg_type != MessageType.HANDSHAKE:
+            self.scorer.record(peer.host, "bad_handshake")
             return
         self._process_handshake(peer, msg)
         # verify genesis match
         our_genesis = self.node.chain.get_block_by_height(0)
         if our_genesis and peer.genesis_hash != our_genesis.block_hash().hex():
             logger.warning(f"genesis mismatch with {peer.address}")
+            self.scorer.record(peer.host, "bad_handshake")
             return
         peer.handshake_done = True
 
@@ -219,8 +312,9 @@ class P2PServer:
     async def _on_tx_announce(self, peer: PeerConnection, msg: Message) -> None:
         tx_hash_hex = msg.payload["tx_hash"]
         if tx_hash_hex in self._seen_tx_hashes:
+            self._seen_tx_hashes.move_to_end(tx_hash_hex)
             return
-        self._seen_tx_hashes.add(tx_hash_hex)
+        self._seen_add(self._seen_tx_hashes, tx_hash_hex)
         tx_hash = bytes.fromhex(tx_hash_hex)
         if tx_hash in self.node.mempool or tx_hash in self.node.chain.tx_index:
             return
@@ -247,13 +341,21 @@ class P2PServer:
 
     async def _on_mempool_request(self, peer: PeerConnection, msg: Message) -> None:
         pending = self.node.mempool.get_pending()
-        tx_hashes = [tx.tx_hash().hex() for tx in pending]
+        # Skip hashes we've already gossiped to this peer.
+        tx_hashes: list[str] = []
+        for tx in pending:
+            h = tx.tx_hash().hex()
+            if h in peer.sent_mempool_hashes:
+                continue
+            tx_hashes.append(h)
+            peer.sent_mempool_hashes.add(h)
         await peer.send(make_mempool_response(tx_hashes))
 
     async def _on_mempool_response(self, peer: PeerConnection, msg: Message) -> None:
         tx_hashes = msg.payload.get("tx_hashes", [])
         for tx_hash_hex in tx_hashes:
             if tx_hash_hex in self._seen_tx_hashes:
+                self._seen_tx_hashes.move_to_end(tx_hash_hex)
                 continue
             tx_hash = bytes.fromhex(tx_hash_hex)
             if tx_hash in self.node.mempool or tx_hash in self.node.chain.tx_index:
@@ -267,8 +369,9 @@ class P2PServer:
         block_hash_hex = msg.payload["block_hash"]
         height = msg.payload["height"]
         if block_hash_hex in self._seen_block_hashes:
+            self._seen_block_hashes.move_to_end(block_hash_hex)
             return
-        self._seen_block_hashes.add(block_hash_hex)
+        self._seen_add(self._seen_block_hashes, block_hash_hex)
         block_hash = bytes.fromhex(block_hash_hex)
         if self.node.chain.get_block_by_hash(block_hash) is not None:
             return
@@ -349,7 +452,7 @@ class P2PServer:
     # -- Broadcasting --
 
     async def broadcast_tx(self, tx_hash_hex: str, exclude: PeerConnection | None = None) -> None:
-        self._seen_tx_hashes.add(tx_hash_hex)
+        self._seen_add(self._seen_tx_hashes, tx_hash_hex)
         msg = make_tx_announce(tx_hash_hex)
         for peer in list(self.peers.values()):
             if peer is not exclude and not peer.is_closed:
@@ -358,7 +461,7 @@ class P2PServer:
     async def broadcast_block(
         self, block_hash_hex: str, height: int, exclude: PeerConnection | None = None,
     ) -> None:
-        self._seen_block_hashes.add(block_hash_hex)
+        self._seen_add(self._seen_block_hashes, block_hash_hex)
         msg = make_block_announce(block_hash_hex, height)
         for peer in list(self.peers.values()):
             if peer is not exclude and not peer.is_closed:
@@ -387,7 +490,7 @@ class P2PServer:
             # Short delay to let responses arrive before connecting
             await asyncio.sleep(2)
             for addr in list(self.known_addresses):
-                if not self._is_connected_to(*addr) and len(self.peers) < MAX_PEERS:
+                if not self._is_connected_to(*addr) and self._outbound_count < MAX_OUTBOUND:
                     asyncio.create_task(self.connect_to_peer(*addr))
             self.save_peers()
             await asyncio.sleep(PEER_EXCHANGE_INTERVAL)
@@ -421,6 +524,50 @@ class P2PServer:
                 logger.info(f"loaded {loaded} saved peers from {path}")
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning(f"failed to load peers from {path}: {e}")
+
+    # -- Seen-set persistence --
+
+    def _seen_path(self) -> str | None:
+        if self.data_dir is None:
+            return None
+        return os.path.join(self.data_dir, "seen.json")
+
+    def load_seen(self) -> None:
+        path = self._seen_path()
+        if path is None or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            for h in (data.get("tx") or [])[-SEEN_SET_MAX:]:
+                if isinstance(h, str):
+                    self._seen_tx_hashes[h] = None
+            for h in (data.get("block") or [])[-SEEN_SET_MAX:]:
+                if isinstance(h, str):
+                    self._seen_block_hashes[h] = None
+        except (json.JSONDecodeError, OSError, TypeError) as e:
+            logger.warning(f"failed to load seen-set from {path}: {e}")
+
+    def save_seen(self) -> None:
+        path = self._seen_path()
+        if path is None:
+            return
+        data = {
+            "tx": list(self._seen_tx_hashes.keys()),
+            "block": list(self._seen_block_hashes.keys()),
+        }
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.debug(f"failed to save seen-set: {e}")
+
+    async def _seen_flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(SEEN_SET_FLUSH_INTERVAL)
+            self.save_seen()
 
     def save_peers(self) -> None:
         """Save known_addresses to disk atomically."""

@@ -108,15 +108,44 @@ class TestMempoolAdd:
     def test_reject_nonce_too_low(self):
         chain, priv, pub = setup_chain()
         pool = Mempool(chain)
-        # add nonce=0
-        post0 = Post(author=pub, nonce=0, timestamp=1000010, body="first", reply_to=None, gas_fee=1)
-        post0.sign_tx(priv)
-        pool.add(post0)
-        # try nonce=0 again (now expected is 1)
-        post_dup = Post(author=pub, nonce=0, timestamp=1000011, body="dup", reply_to=None, gas_fee=1)
-        post_dup.sign_tx(priv)
+        # confirm a tx at nonce 0 on-chain so the pending tracker moves past it
+        confirmed = Post(author=pub, nonce=0, timestamp=1000015, body="first", reply_to=None, gas_fee=1)
+        confirmed.sign_tx(priv)
+        block = build_block(chain, [confirmed], pub, 1000015)
+        chain.add_block(block, current_time=1000020)
+        # now nonce=0 is below the on-chain expected nonce (1)
+        post_stale = Post(author=pub, nonce=0, timestamp=1000021, body="stale", reply_to=None, gas_fee=1)
+        post_stale.sign_tx(priv)
         with pytest.raises(ValidationError, match="nonce too low"):
-            pool.add(post_dup)
+            pool.add(post_stale)
+
+    def test_rbf_requires_fee_bump(self):
+        chain, priv, pub = setup_chain()
+        pool = Mempool(chain)
+        p0 = Post(author=pub, nonce=0, timestamp=1000010, body="first", reply_to=None, gas_fee=1)
+        p0.sign_tx(priv)
+        pool.add(p0)
+        # same nonce, same fee: rejected
+        p1 = Post(author=pub, nonce=0, timestamp=1000011, body="same-fee", reply_to=None, gas_fee=1)
+        p1.sign_tx(priv)
+        with pytest.raises(ValidationError, match="replacement fee too low"):
+            pool.add(p1)
+        assert pool.size == 1
+        assert p0.tx_hash() in pool
+
+    def test_rbf_accepts_with_10pct_bump(self):
+        chain, priv, pub = setup_chain()
+        pool = Mempool(chain)
+        p0 = Post(author=pub, nonce=0, timestamp=1000010, body="low", reply_to=None, gas_fee=10)
+        p0.sign_tx(priv)
+        pool.add(p0)
+        # 10% bump of 10 = 1, so new fee must be >= 11
+        p1 = Post(author=pub, nonce=0, timestamp=1000011, body="high", reply_to=None, gas_fee=11)
+        p1.sign_tx(priv)
+        pool.add(p1)
+        assert pool.size == 1
+        assert p0.tx_hash() not in pool
+        assert p1.tx_hash() in pool
 
     def test_reject_insufficient_balance(self):
         chain, priv, pub = setup_chain()

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from jiji.core.block import Block
-from jiji.core.config import MAX_MEMPOOL_SIZE
+from jiji.core.config import MAX_MEMPOOL_SIZE, RBF_MIN_BUMP_BPS
+from jiji.core.serialization import canonicalize
 from jiji.core.transaction import Coinbase, Post, Endorse, Transfer, Transaction
 from jiji.core.validation import (
     ValidationError,
     validate_transaction_format,
     validate_transaction_state,
 )
+
+_SIGNATURE_FIELD = {"signature"}
 
 if __import__("typing").TYPE_CHECKING:
     from jiji.core.chain import Blockchain
@@ -36,7 +39,12 @@ class Mempool:
         return tx_hash in self._txs
 
     def add(self, tx: Transaction) -> bytes:
-        """Validate and add a transaction. Returns tx_hash. Raises ValidationError."""
+        """Validate and add a transaction. Returns tx_hash. Raises ValidationError.
+
+        Supports replace-by-fee: if a transaction with the same (sender, nonce)
+        is already pending, the incoming tx replaces it only if its gas_fee
+        exceeds the old fee by at least RBF_MIN_BUMP_BPS basis points.
+        """
         if isinstance(tx, Coinbase):
             raise ValidationError("coinbase transactions cannot be added to mempool")
 
@@ -47,7 +55,6 @@ class Mempool:
             raise ValidationError("transaction already in mempool")
         if tx_hash in self._chain.tx_index:
             raise ValidationError("transaction already confirmed")
-        # also check queued
         pubkey = _get_sender(tx)
         tx_nonce = _get_nonce(tx)
         if pubkey is not None and pubkey in self._queued:
@@ -57,8 +64,23 @@ class Mempool:
         # validate format (signature, limits, etc.)
         validate_transaction_format(tx)
 
-        # determine expected nonce for this sender
-        expected = self._expected_nonce(pubkey)
+        # RBF: if a pending tx exists for (pubkey, tx_nonce), require fee bump
+        replaced_hash: bytes | None = None
+        if pubkey is not None:
+            replaced_hash = self._find_rbf_target(pubkey, tx_nonce)
+            if replaced_hash is not None:
+                old_tx = self._txs[replaced_hash]
+                old_fee = _get_gas_fee(old_tx)
+                new_fee = _get_gas_fee(tx)
+                min_required = old_fee + max(1, (old_fee * RBF_MIN_BUMP_BPS) // 10000)
+                if new_fee < min_required:
+                    raise ValidationError(
+                        f"replacement fee too low: {new_fee} < {min_required} "
+                        f"(old={old_fee}, min-bump={RBF_MIN_BUMP_BPS}bps)"
+                    )
+
+        # determine expected nonce for this sender (after any RBF target removed)
+        expected = self._expected_nonce(pubkey, ignore_tx_hash=replaced_hash)
 
         if pubkey is not None and tx_nonce > expected:
             # future nonce — queue it for later promotion
@@ -71,6 +93,10 @@ class Mempool:
             raise ValidationError(
                 f"nonce too low: tx={tx_nonce}, expected={expected}"
             )
+
+        # RBF replacement: drop the old tx before inserting the new one
+        if replaced_hash is not None:
+            del self._txs[replaced_hash]
 
         # nonce matches — validate against chain state or accept as sequential pending
         if pubkey is not None and pubkey in self._pending_nonces:
@@ -89,11 +115,11 @@ class Mempool:
 
     def _insert(self, tx: Transaction, pubkey: bytes | None) -> None:
         """Insert a tx into the active pool and update nonce tracking."""
-        # evict lowest-fee tx if pool is full
+        # evict lowest-priority tx (gas-per-byte) if pool is full
         if len(self._txs) >= self._max_size:
-            tx_fee = _get_gas_fee(tx)
-            lowest_hash, lowest_fee = self._find_lowest_fee()
-            if lowest_fee is not None and tx_fee > lowest_fee:
+            tx_priority = _tx_priority(tx)
+            lowest_hash, lowest_priority = self._find_lowest_priority()
+            if lowest_priority is not None and tx_priority > lowest_priority:
                 del self._txs[lowest_hash]
             else:
                 raise ValidationError("mempool full and fee too low for eviction")
@@ -116,14 +142,39 @@ class Mempool:
         if not queue:
             del self._queued[pubkey]
 
-    def _expected_nonce(self, pubkey: bytes | None) -> int:
-        """Return the next expected nonce for a sender."""
+    def _expected_nonce(self, pubkey: bytes | None, ignore_tx_hash: bytes | None = None) -> int:
+        """Return the next expected nonce for a sender.
+
+        If ignore_tx_hash is provided, the pending nonce tracker is recomputed
+        as if that transaction were absent (used during RBF replacement).
+        """
         if pubkey is None:
             return 0
+        if ignore_tx_hash is not None:
+            highest_nonce = -1
+            for tx_hash, tx in self._txs.items():
+                if tx_hash == ignore_tx_hash:
+                    continue
+                if _get_sender(tx) != pubkey:
+                    continue
+                n = _get_nonce(tx)
+                if n > highest_nonce:
+                    highest_nonce = n
+            if highest_nonce >= 0:
+                return highest_nonce + 1
+            account = self._chain.state.get_account(pubkey)
+            return account.nonce if account else 0
         if pubkey in self._pending_nonces:
             return self._pending_nonces[pubkey]
         account = self._chain.state.get_account(pubkey)
         return account.nonce if account else 0
+
+    def _find_rbf_target(self, pubkey: bytes, nonce: int) -> bytes | None:
+        """Return the tx_hash of a pending tx matching (pubkey, nonce), or None."""
+        for tx_hash, existing in self._txs.items():
+            if _get_sender(existing) == pubkey and _get_nonce(existing) == nonce:
+                return tx_hash
+        return None
 
     def remove(self, tx_hash: bytes) -> None:
         """Remove a single transaction by hash."""
@@ -155,8 +206,17 @@ class Mempool:
         return self._txs.get(tx_hash)
 
     def get_pending(self, limit: int | None = None) -> list[Transaction]:
-        """Return transactions sorted by gas_fee descending (miner priority)."""
-        txs = sorted(self._txs.values(), key=_get_gas_fee, reverse=True)
+        """Return transactions sorted by gas-per-byte descending (miner priority).
+
+        Secondary key is raw gas_fee so that ties on the ratio fall back to
+        absolute fee (matches intuition and keeps the old tests' ordering when
+        tx sizes are uniform).
+        """
+        txs = sorted(
+            self._txs.values(),
+            key=lambda t: (_tx_priority(t), _get_gas_fee(t)),
+            reverse=True,
+        )
         if limit is not None:
             txs = txs[:limit]
         return txs
@@ -183,16 +243,40 @@ class Mempool:
             if pubkey not in self._pending_nonces or next_nonce > self._pending_nonces[pubkey]:
                 self._pending_nonces[pubkey] = next_nonce
 
-    def _find_lowest_fee(self) -> tuple[bytes | None, int | None]:
-        """Find the transaction with the lowest gas fee."""
+    def _find_lowest_priority(self) -> tuple[bytes | None, float | None]:
+        """Find the transaction with the lowest gas-per-byte ratio."""
         lowest_hash = None
-        lowest_fee = None
+        lowest_priority: float | None = None
         for tx_hash, tx in self._txs.items():
-            fee = _get_gas_fee(tx)
-            if lowest_fee is None or fee < lowest_fee:
+            priority = _tx_priority(tx)
+            if lowest_priority is None or priority < lowest_priority:
                 lowest_hash = tx_hash
-                lowest_fee = fee
-        return lowest_hash, lowest_fee
+                lowest_priority = priority
+        return lowest_hash, lowest_priority
+
+
+def _tx_size(tx: Transaction) -> int:
+    """Canonical serialization size in bytes, memoized on the tx object."""
+    cached = getattr(tx, "_jiji_size", None)
+    if cached is not None:
+        return cached
+    if isinstance(tx, Coinbase):
+        size = len(canonicalize(tx.to_dict()))
+    else:
+        size = len(canonicalize(tx.to_dict(), exclude_fields=_SIGNATURE_FIELD))
+    try:
+        tx._jiji_size = size  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass
+    return size
+
+
+def _tx_priority(tx: Transaction) -> float:
+    """Miner priority: gas fee per byte of canonical serialization."""
+    size = _tx_size(tx)
+    if size <= 0:
+        return 0.0
+    return _get_gas_fee(tx) / size
 
 
 def _get_gas_fee(tx: Transaction) -> int:

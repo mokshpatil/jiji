@@ -9,6 +9,7 @@ from jiji.core.config import (
     DIFFICULTY_ADJUSTMENT_WINDOW,
     ENDORSE_MESSAGE_LIMIT,
     GENESIS_DIFFICULTY,
+    HARDFORK_HEIGHT,
     MAX_BLOCK_SIZE,
     MAX_DIFFICULTY_ADJUSTMENT,
     MAX_FUTURE_TIMESTAMP,
@@ -358,8 +359,15 @@ def validate_block(block: Block, chain: Blockchain, current_time: int) -> None:
 
         # Resolve target author for endorsement tips
         target_author = None
-        if isinstance(tx, Endorse) and tx.amount > 0:
-            target_author = working_authors.get(tx.target)
+        if isinstance(tx, Endorse):
+            resolved = working_authors.get(tx.target)
+            # Hard-fork rule: a user cannot endorse their own post. This closes
+            # a cheap self-cycle that drained gas to no social signal.
+            if (header.height >= HARDFORK_HEIGHT
+                    and resolved is not None and resolved == tx.author):
+                raise ValidationError("self-endorsement not allowed")
+            if tx.amount > 0:
+                target_author = resolved
 
         # Apply to working state
         working_state.apply_transaction(tx, header.miner, target_author)

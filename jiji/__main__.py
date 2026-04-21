@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import sys
 import time
 import urllib.request
@@ -220,15 +221,76 @@ def cmd_status(args: argparse.Namespace) -> None:
 # Node runner
 # ---------------------------------------------------------------------------
 
+def _resolve_rpc_token(args: argparse.Namespace) -> str | None:
+    """Resolve --rpc-token into a concrete token (or None if auth disabled).
+
+    "auto" generates a fresh 32-byte hex token and persists it to
+    {data_dir}/rpc_token when data_dir is set, so the token survives restarts.
+    Any other string is used verbatim.
+    """
+    token_arg = getattr(args, "rpc_token", None)
+    if not token_arg:
+        return None
+    if token_arg != "auto":
+        return token_arg
+    token_path: str | None = None
+    if args.data_dir:
+        token_path = os.path.join(args.data_dir, "rpc_token")
+        if os.path.exists(token_path):
+            with open(token_path, "r") as f:
+                existing = f.read().strip()
+                if existing:
+                    return existing
+    token = secrets.token_hex(32)
+    if token_path:
+        os.makedirs(args.data_dir, exist_ok=True)
+        with open(token_path, "w") as f:
+            f.write(token)
+        os.chmod(token_path, 0o600)
+        print(f"RPC token written to {token_path}")
+    else:
+        print(f"RPC token (ephemeral): {token}")
+    return token
+
+
+def _apply_lan_defaults(args: argparse.Namespace) -> None:
+    """--lan sets non-loopback RPC bind, mDNS, bearer token, and CORS."""
+    if not getattr(args, "lan", False):
+        return
+    # Only override user-specified values when they match the default loopback.
+    if args.rpc_host == "127.0.0.1":
+        args.rpc_host = "0.0.0.0"
+    if getattr(args, "mdns", None) is None:
+        args.mdns = True
+    if not getattr(args, "rpc_token", None):
+        args.rpc_token = "auto"
+    if getattr(args, "rpc_allow_origin", None) is None:
+        args.rpc_allow_origin = "*"
+
+
 async def run_node(args: argparse.Namespace) -> None:
     private_key, public_key = load_or_generate_keypair(args.keyfile)
     bootstrap_peers = parse_peers(args.peers)
+
+    _apply_lan_defaults(args)
+    rpc_token = _resolve_rpc_token(args)
+    mdns_enabled = bool(getattr(args, "mdns", False))
+    rate_limit = bool(getattr(args, "rate_limit", True))
+    trust_raw = getattr(args, "trust_ip", "") or ""
+    trusted_cidrs = tuple(c.strip() for c in trust_raw.split(",") if c.strip())
 
     print(f"Public key: {public_key.hex()}")
     print(f"P2P: {args.host}:{args.port}")
     print(f"RPC: {args.rpc_host}:{args.rpc_port}")
     print(f"Mining: {'enabled' if args.mine else 'disabled'}")
     print(f"Storage: {args.data_dir or 'in-memory'}")
+    print(f"mDNS discovery: {'on' if mdns_enabled else 'off'}")
+    print(f"RPC auth: {'bearer token required' if rpc_token else 'none'}")
+    print(f"Rate limits: {'on' if rate_limit else 'off'}")
+    if trusted_cidrs:
+        print(f"Trusted CIDRs: {', '.join(trusted_cidrs)}")
+    if getattr(args, "rpc_allow_origin", None):
+        print(f"RPC CORS allow-origin: {args.rpc_allow_origin}")
     if bootstrap_peers:
         print(f"Bootstrap peers: {bootstrap_peers}")
 
@@ -242,6 +304,11 @@ async def run_node(args: argparse.Namespace) -> None:
         rpc_port=args.rpc_port,
         mine=args.mine,
         bootstrap_peers=bootstrap_peers,
+        rpc_auth_token=rpc_token,
+        rpc_allow_origin=getattr(args, "rpc_allow_origin", None),
+        mdns=mdns_enabled,
+        rate_limit=rate_limit,
+        trusted_cidrs=trusted_cidrs,
     )
     await node.start()
 
@@ -285,6 +352,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Data directory for persistent storage")
     node_p.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    node_p.add_argument("--lan", action="store_true",
+                        help="Convenience: bind RPC to 0.0.0.0, enable mDNS discovery, "
+                             "auto-generate bearer token, and set CORS allow-origin=*")
+    node_p.add_argument("--mdns", dest="mdns", action="store_true", default=None,
+                        help="Enable mDNS/DNS-SD LAN peer discovery")
+    node_p.add_argument("--no-mdns", dest="mdns", action="store_false",
+                        help="Disable mDNS (overrides --lan)")
+    node_p.add_argument("--rpc-token", default=None, metavar="TOKEN",
+                        help="Bearer token required for RPC requests "
+                             "(use 'auto' to generate and persist one)")
+    node_p.add_argument("--rpc-allow-origin", default=None, metavar="ORIGIN",
+                        help="CORS Access-Control-Allow-Origin value (e.g. '*')")
+    node_p.add_argument("--no-rate-limit", dest="rate_limit",
+                        action="store_false", default=True,
+                        help="Disable all per-peer and per-IP rate limits (trusted network)")
+    node_p.add_argument("--trust-ip", default="", metavar="CIDR,CIDR,...",
+                        help="Comma-separated CIDR ranges exempt from rate limits and bans")
 
     # --- viewblocks ---
     vb_p = subparsers.add_parser("viewblocks", parents=[rpc_flags],
@@ -390,6 +474,14 @@ def main() -> None:
         node_parser.add_argument("--data-dir", default=None)
         node_parser.add_argument("--log-level", default="INFO",
                                   choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+        node_parser.add_argument("--lan", action="store_true")
+        node_parser.add_argument("--mdns", dest="mdns", action="store_true", default=None)
+        node_parser.add_argument("--no-mdns", dest="mdns", action="store_false")
+        node_parser.add_argument("--rpc-token", default=None)
+        node_parser.add_argument("--rpc-allow-origin", default=None)
+        node_parser.add_argument("--no-rate-limit", dest="rate_limit",
+                                  action="store_false", default=True)
+        node_parser.add_argument("--trust-ip", default="")
         args = node_parser.parse_args()
         logging.basicConfig(
             level=getattr(logging, args.log_level),

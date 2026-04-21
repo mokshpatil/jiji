@@ -17,6 +17,13 @@ from jiji.net.server import P2PServer
 from jiji.rpc.server import RPCServer
 from jiji.storage.store import BlockStore
 
+try:
+    from jiji.net.discovery import LANDiscovery
+    _MDNS_AVAILABLE = True
+except ImportError:  # zeroconf is an optional runtime dep
+    LANDiscovery = None  # type: ignore[assignment]
+    _MDNS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +41,11 @@ class Node:
         rpc_port: int = DEFAULT_RPC_PORT,
         mine: bool = False,
         bootstrap_peers: list[tuple[str, int]] | None = None,
+        rpc_auth_token: str | None = None,
+        rpc_allow_origin: str | None = None,
+        mdns: bool = False,
+        rate_limit: bool = True,
+        trusted_cidrs: tuple[str, ...] = (),
     ):
         self.private_key = private_key
         self.public_key = public_key
@@ -48,12 +60,25 @@ class Node:
         self.chain = Blockchain(store=self._store)
         self.mempool = Mempool(self.chain)
         self.miner = Miner(self.chain, self.mempool, self.public_key)
-        self.p2p = P2PServer(self, p2p_host, p2p_port, data_dir=data_dir)
-        self.rpc = RPCServer(self, rpc_host, rpc_port)
+        self.p2p = P2PServer(
+            self, p2p_host, p2p_port, data_dir=data_dir,
+            rate_limit=rate_limit, trusted_cidrs=trusted_cidrs,
+        )
+        self.rpc = RPCServer(
+            self, rpc_host, rpc_port,
+            auth_token=rpc_auth_token,
+            allow_origin=rpc_allow_origin,
+            rate_limit=rate_limit,
+            trusted_cidrs=trusted_cidrs,
+        )
         self._mine = mine
         self._bootstrap_peers = bootstrap_peers or []
         self._mining_task: asyncio.Task | None = None
         self._running = False
+        self._mdns_enabled = mdns and _MDNS_AVAILABLE
+        if mdns and not _MDNS_AVAILABLE:
+            logger.warning("mDNS requested but `zeroconf` is not installed — skipping")
+        self._discovery: LANDiscovery | None = None
 
     async def start(self, genesis_block: Block | None = None) -> None:
         """Initialize chain and start servers."""
@@ -90,6 +115,15 @@ class Node:
         if self._mine:
             self._mining_task = asyncio.create_task(self._mining_loop())
 
+        if self._mdns_enabled and self.chain.tip is not None:
+            genesis_hash = self.chain.get_block_by_height(0).block_hash()
+            self._discovery = LANDiscovery(self.p2p, genesis_hash)
+            try:
+                await self._discovery.start()
+            except Exception as e:
+                logger.warning(f"mDNS discovery failed to start: {e}")
+                self._discovery = None
+
         self._running = True
         logger.info("node started")
 
@@ -102,6 +136,11 @@ class Node:
                 await self._mining_task
             except asyncio.CancelledError:
                 pass
+        if self._discovery is not None:
+            try:
+                await self._discovery.stop()
+            except Exception as e:
+                logger.debug(f"mDNS shutdown error: {e}")
         self.p2p.save_peers()
         await self.p2p.stop()
         await self.rpc.stop()

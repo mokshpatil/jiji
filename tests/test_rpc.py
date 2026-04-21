@@ -286,3 +286,155 @@ class TestRPCHTTP:
             finally:
                 await rpc.stop()
         self._run(_test())
+
+
+async def _send_request(port: int, body_bytes: bytes, extra_headers: str = "") -> bytes:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    header = (
+        f"POST / HTTP/1.1\r\nContent-Length: {len(body_bytes)}\r\n"
+        + extra_headers + "\r\n"
+    ).encode()
+    writer.write(header + body_bytes)
+    await writer.drain()
+    resp = await asyncio.wait_for(reader.read(8192), timeout=5)
+    writer.close()
+    await writer.wait_closed()
+    return resp
+
+
+async def _send_options(port: int, extra_headers: str = "") -> bytes:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    header = (
+        "OPTIONS / HTTP/1.1\r\n"
+        + extra_headers + "\r\n"
+    ).encode()
+    writer.write(header)
+    await writer.drain()
+    resp = await asyncio.wait_for(reader.read(8192), timeout=5)
+    writer.close()
+    await writer.wait_closed()
+    return resp
+
+
+class TestRPCAuth:
+    def test_rejects_missing_token(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0, auth_token="secret")
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                body = json.dumps({
+                    "jsonrpc": "2.0", "method": "get_latest_block", "params": {}, "id": 1,
+                }).encode()
+                resp = await _send_request(port, body)
+                assert b"401 Unauthorized" in resp
+                _, _, resp_body = resp.partition(b"\r\n\r\n")
+                data = json.loads(resp_body)
+                assert data["error"]["code"] == -32001
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())
+
+    def test_rejects_wrong_token(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0, auth_token="secret")
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                body = json.dumps({
+                    "jsonrpc": "2.0", "method": "get_latest_block", "params": {}, "id": 1,
+                }).encode()
+                resp = await _send_request(
+                    port, body, "Authorization: Bearer wrong\r\n"
+                )
+                assert b"401 Unauthorized" in resp
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())
+
+    def test_accepts_valid_token(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0, auth_token="secret")
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                body = json.dumps({
+                    "jsonrpc": "2.0", "method": "get_latest_block", "params": {}, "id": 1,
+                }).encode()
+                resp = await _send_request(
+                    port, body, "Authorization: Bearer secret\r\n"
+                )
+                assert b"200 OK" in resp
+                _, _, resp_body = resp.partition(b"\r\n\r\n")
+                data = json.loads(resp_body)
+                assert data["result"]["header"]["height"] == 0
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())
+
+
+class TestRPCCors:
+    def test_options_preflight_returns_204_with_cors_headers(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0, allow_origin="*")
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                resp = await _send_options(port)
+                assert b"204 No Content" in resp
+                assert b"Access-Control-Allow-Origin: *" in resp
+                assert b"Access-Control-Allow-Methods: POST, OPTIONS" in resp
+                assert b"Access-Control-Allow-Headers: Authorization, Content-Type" in resp
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())
+
+    def test_post_response_includes_cors_headers(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0, allow_origin="*")
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                body = json.dumps({
+                    "jsonrpc": "2.0", "method": "get_latest_block", "params": {}, "id": 1,
+                }).encode()
+                resp = await _send_request(port, body)
+                assert b"Access-Control-Allow-Origin: *" in resp
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())
+
+    def test_no_cors_headers_when_disabled(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0)
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                body = json.dumps({
+                    "jsonrpc": "2.0", "method": "get_latest_block", "params": {}, "id": 1,
+                }).encode()
+                resp = await _send_request(port, body)
+                assert b"Access-Control-Allow-Origin" not in resp
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())
+
+    def test_options_preflight_bypasses_auth(self):
+        async def _test():
+            node = FakeNode()
+            rpc = RPCServer(node, "127.0.0.1", 0, auth_token="secret", allow_origin="*")
+            await rpc.start()
+            port = rpc._server.sockets[0].getsockname()[1]
+            try:
+                # no Authorization header — preflight must still succeed
+                resp = await _send_options(port)
+                assert b"204 No Content" in resp
+            finally:
+                await rpc.stop()
+        asyncio.run(_test())

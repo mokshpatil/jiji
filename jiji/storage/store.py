@@ -37,6 +37,9 @@ class BlockStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_blocks_prev_hash ON blocks(prev_hash)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_blocks_main ON blocks(on_main_chain, height)"
+        )
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
