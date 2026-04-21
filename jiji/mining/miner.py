@@ -43,7 +43,6 @@ class Miner:
         # simulate state to select valid transactions
         working_state = self._chain.state.copy()
         working_state.apply_transaction(coinbase, self._pubkey)
-        working_posts = set(self._chain.known_posts)
         working_authors = dict(self._chain.post_authors)
 
         for tx in self._mempool.get_pending():
@@ -54,7 +53,7 @@ class Miner:
                     validate_transaction_state,
                 )
                 validate_transaction_format(tx)
-                validate_transaction_state(tx, working_state, working_posts)
+                validate_transaction_state(tx, working_state, working_authors, height)
             except ValidationError:
                 continue
 
@@ -72,9 +71,7 @@ class Miner:
             selected.append(tx)
 
             if isinstance(tx, Post):
-                tx_h = tx.tx_hash()
-                working_posts.add(tx_h)
-                working_authors[tx_h] = tx.author
+                working_authors[tx.tx_hash()] = tx.author
 
         # compute roots
         tx_hashes = [tx.tx_hash() for tx in selected]

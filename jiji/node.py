@@ -292,6 +292,10 @@ class Node:
                     await asyncio.sleep(5)
             except ValidationError as e:
                 logger.warning(f"mined block rejected: {e}")
+                # Purge any tx that no longer validates against current state
+                # so the next template doesn't re-select the same bad tx and
+                # livelock the miner.
+                self.mempool.revalidate()
             except asyncio.CancelledError:
                 break
             except Exception as e:

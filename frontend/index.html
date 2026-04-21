@@ -1,200 +1,172 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Jiji Explorer</title>
-
-  <style>
-    body {
-      font-family: Arial;
-      background: #0f172a;
-      color: #e2e8f0;
-      padding: 20px;
-      max-width: 700px;
-      margin: auto;
-    }
-
-    h1 {
-      text-align: center;
-    }
-
-    .tabs {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 20px;
-    }
-
-    .tab {
-      padding: 10px 15px;
-      background: #1e293b;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-
-    .tab.active {
-      background: #38bdf8;
-      color: black;
-    }
-
-    .card {
-      background: #1e293b;
-      padding: 15px;
-      margin-bottom: 15px;
-      border-radius: 10px;
-    }
-
-    .meta {
-      font-size: 12px;
-      color: #94a3b8;
-    }
-
-    button {
-      margin-bottom: 20px;
-      padding: 10px;
-      background: #38bdf8;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>jiji</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
-
 <body>
 
-<h1>Jiji Feed</h1>
+<!-- Lock / setup overlay -->
+<div id="lock-screen" class="overlay">
+    <div class="card">
+        <h1>jiji</h1>
+        <p class="sub">a social network on a blockchain</p>
 
-<div class="tabs">
-  <div class="tab active" onclick="setTab('posts')">Posts</div>
-  <div class="tab" onclick="setTab('transfers')">Transfers</div>
-  <div class="tab" onclick="setTab('all')">All</div>
+        <!-- Shown if a wallet blob exists in localStorage -->
+        <div id="unlock-panel" class="panel hidden">
+            <h2>Unlock wallet</h2>
+            <input type="password" id="unlock-pass" placeholder="passphrase" autocomplete="current-password">
+            <button id="unlock-btn">Unlock</button>
+            <div class="row-links">
+                <button class="link" id="show-create">Create new</button>
+                <button class="link" id="show-import">Import key</button>
+                <button class="link danger" id="wipe-btn">Delete wallet</button>
+            </div>
+        </div>
+
+        <!-- Shown on first visit or after user chooses "create new" -->
+        <div id="create-panel" class="panel hidden">
+            <h2>Create a wallet</h2>
+            <p class="hint">We'll generate an Ed25519 keypair in this browser. Your private key is
+            encrypted with your passphrase and stored only on this device.</p>
+            <input type="password" id="create-pass" placeholder="new passphrase" autocomplete="new-password">
+            <input type="password" id="create-pass2" placeholder="confirm passphrase" autocomplete="new-password">
+            <button id="create-btn">Create</button>
+            <div class="row-links">
+                <button class="link" id="back-from-create">Back</button>
+            </div>
+        </div>
+
+        <!-- Import an existing hex private key -->
+        <div id="import-panel" class="panel hidden">
+            <h2>Import private key</h2>
+            <p class="hint">Paste your 64-char hex private key. It will be encrypted with a passphrase.</p>
+            <input type="text" id="import-hex" placeholder="abcdef0123...  (64 hex chars)" spellcheck="false">
+            <input type="password" id="import-pass" placeholder="new passphrase" autocomplete="new-password">
+            <input type="password" id="import-pass2" placeholder="confirm passphrase" autocomplete="new-password">
+            <button id="import-btn">Import</button>
+            <div class="row-links">
+                <button class="link" id="back-from-import">Back</button>
+            </div>
+        </div>
+
+        <p id="lock-error" class="err"></p>
+    </div>
 </div>
 
-<button onclick="loadData()">Refresh</button>
+<!-- Node connection setup -->
+<div id="node-screen" class="overlay hidden">
+    <div class="card">
+        <h1>Connect to a node</h1>
+        <p class="hint">Point jiji at a running node. If you used <code>--lan</code>, the bearer
+        token was printed when the node started, or saved to
+        <code>&lt;data-dir&gt;/rpc_token</code>.</p>
+        <label>RPC URL</label>
+        <input type="text" id="node-url" placeholder="http://127.0.0.1:9332" spellcheck="false">
+        <label>Bearer token <span class="hint-inline">(leave blank if node has no auth)</span></label>
+        <input type="text" id="node-token" placeholder="hex token, optional" spellcheck="false">
+        <button id="node-connect">Connect</button>
+        <p id="node-error" class="err"></p>
+    </div>
+</div>
 
-<div id="feed"></div>
-
-<script>
-const RPC_URL = "http://127.0.0.1:9332";
-
-let currentTab = "posts";
-
-function setTab(tab) {
-  currentTab = tab;
-
-  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-  event.target.classList.add("active");
-
-  loadData();
-}
-
-async function rpc(method, params = {}) {
-  const res = await fetch(RPC_URL, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      method,
-      params,
-      id: 1
-    })
-  });
-
-  const data = await res.json();
-  return data.result;
-}
-
-async function loadData() {
-  const feed = document.getElementById("feed");
-  feed.innerHTML = "Loading...";
-
-  try {
-    const latest = await rpc("get_latest_block");
-    const height = latest.header.height;
-
-    let items = [];
-
-    for (let i = height; i > height - 2000 && i >= 0; i--) {
-      const block = await rpc("get_block", { height: i });
-
-      const txs = block.transactions || [];
-
-      txs.forEach(tx => {
-        const type = tx.tx_type || "unknown";
-
-        // FILTER BASED ON TAB
-        if (currentTab === "posts" && type !== "post" && !tx.body) return;
-        if (currentTab === "transfers" && type !== "transfer") return;
-
-        items.push({
-          ...tx,
-          blockHeight: block.header.height,
-          timestamp: block.header.timestamp
-        });
-      });
-    }
-
-    // sort newest first
-    items.sort((a, b) => b.timestamp - a.timestamp);
-
-    feed.innerHTML = "";
-
-    items.forEach(item => {
-      const div = document.createElement("div");
-      div.className = "card";
-
-      let content = "";
-
-      if (item.tx_type === "post" || item.body) {
-        content = `
-          <b>Post</b>
-          <p>${item.body}</p>
-          <div class="meta">
-            ${item.author?.slice(0,12)}...
-          </div>
-        `;
-      }
-
-      else if (item.tx_type === "transfer") {
-        content = `
-          <b>Transfer</b>
-          <p>${item.amount} tokens</p>
-          <div class="meta">
-            to ${item.recipient?.slice(0,12)}...
-          </div>
-        `;
-      }
-
-      else if (item.tx_type === "coinbase") {
-        content = `
-          <b>Mining Reward</b>
-          <p>${item.amount}</p>
-        `;
-      }
-
-      else {
-        content = `<pre>${JSON.stringify(item, null, 2)}</pre>`;
-      }
-
-      div.innerHTML = `
-        ${content}
-        <div class="meta">
-          block #${item.blockHeight} • 
-          ${new Date(item.timestamp * 1000).toLocaleString()}
+<!-- Main app -->
+<div id="app" class="hidden">
+    <header>
+        <div class="brand">jiji</div>
+        <nav>
+            <button class="tab" data-view="feed">Feed</button>
+            <button class="tab" data-view="compose">Compose</button>
+            <button class="tab" data-view="wallet">Wallet</button>
+            <button class="tab" data-view="settings">Settings</button>
+        </nav>
+        <div class="status">
+            <span id="status-height">—</span>
+            <button id="refresh-btn" title="Refresh">↻</button>
         </div>
-      `;
+    </header>
 
-      feed.appendChild(div);
-    });
+    <main>
+        <!-- Feed -->
+        <section id="view-feed" class="view">
+            <div class="view-head">
+                <h2>Feed</h2>
+                <div id="feed-info" class="muted"></div>
+            </div>
+            <div id="feed-list" class="feed"></div>
+        </section>
 
-    if (items.length === 0) {
-      feed.innerHTML = "Nothing here yet...";
-    }
+        <!-- Compose -->
+        <section id="view-compose" class="view hidden">
+            <h2 id="compose-title">New post</h2>
+            <div id="reply-banner" class="banner hidden"></div>
+            <textarea id="post-body" maxlength="300" placeholder="say something (max 300 chars)"></textarea>
+            <div class="row">
+                <label>Gas fee <input type="number" id="post-fee" min="1" value="1"></label>
+                <button id="post-submit">Submit post</button>
+            </div>
+            <p id="compose-error" class="err"></p>
+            <p id="compose-ok" class="ok"></p>
+        </section>
 
-  } catch (err) {
-    feed.innerHTML = "Error loading data";
-    console.error(err);
-  }
-}
-</script>
+        <!-- Wallet -->
+        <section id="view-wallet" class="view hidden">
+            <h2>Wallet</h2>
+            <div class="wallet-box">
+                <div class="stat"><span class="label">Balance</span><span id="w-balance">—</span></div>
+                <div class="stat"><span class="label">Nonce</span><span id="w-nonce">—</span></div>
+                <div class="stat"><span class="label">Next nonce</span><span id="w-next-nonce">—</span></div>
+            </div>
+            <h3>Send transfer</h3>
+            <label>Recipient pubkey (hex)</label>
+            <input type="text" id="xfer-to" placeholder="64 hex chars" spellcheck="false">
+            <div class="row">
+                <label>Amount <input type="number" id="xfer-amount" min="1"></label>
+                <label>Gas fee <input type="number" id="xfer-fee" min="1" value="1"></label>
+                <button id="xfer-submit">Send</button>
+            </div>
+            <p id="xfer-error" class="err"></p>
+            <p id="xfer-ok" class="ok"></p>
+        </section>
 
+        <!-- Settings -->
+        <section id="view-settings" class="view hidden">
+            <h2>Settings</h2>
+            <div class="settings-block">
+                <label>Your public key</label>
+                <div class="mono-row">
+                    <code id="set-pubkey">—</code>
+                    <button id="copy-pubkey" class="small">Copy</button>
+                </div>
+            </div>
+            <div class="settings-block">
+                <label>Node</label>
+                <div class="mono-row"><code id="set-node">—</code></div>
+                <button id="change-node" class="small">Change node</button>
+            </div>
+            <div class="settings-block">
+                <label>Export private key</label>
+                <p class="hint">You'll be asked for your passphrase. Keep the hex somewhere safe.</p>
+                <button id="export-key" class="small danger">Show private key</button>
+                <div id="export-output" class="hidden">
+                    <div class="mono-row">
+                        <code id="export-hex"></code>
+                        <button id="copy-priv" class="small">Copy</button>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-block">
+                <button id="lock-wallet" class="small">Lock wallet</button>
+                <button id="delete-wallet" class="small danger">Delete wallet from this device</button>
+            </div>
+        </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+</div>
+
+<script type="module" src="app.js"></script>
 </body>
 </html>

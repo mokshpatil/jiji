@@ -153,28 +153,28 @@ class TestStateValidation:
         post = Post(author=pub, nonce=99, timestamp=1000015, body="bad", reply_to=None, gas_fee=1)
         post.sign_tx(priv)
         with pytest.raises(ValidationError, match="nonce"):
-            validate_transaction_state(post, chain.state, chain.known_posts)
+            validate_transaction_state(post, chain.state, chain.post_authors)
 
     def test_insufficient_balance(self):
         chain, priv, pub = make_chain()
         post = Post(author=pub, nonce=0, timestamp=1000015, body="expensive", reply_to=None, gas_fee=999)
         post.sign_tx(priv)
         with pytest.raises(ValidationError, match="insufficient"):
-            validate_transaction_state(post, chain.state, chain.known_posts)
+            validate_transaction_state(post, chain.state, chain.post_authors)
 
     def test_unknown_reply_to(self):
         chain, priv, pub = make_chain()
         post = Post(author=pub, nonce=0, timestamp=1000015, body="reply", reply_to=b"\xff" * 32, gas_fee=1)
         post.sign_tx(priv)
         with pytest.raises(ValidationError, match="unknown post"):
-            validate_transaction_state(post, chain.state, chain.known_posts)
+            validate_transaction_state(post, chain.state, chain.post_authors)
 
     def test_unknown_endorse_target(self):
         chain, priv, pub = make_chain()
         e = Endorse(author=pub, nonce=0, target=b"\xff" * 32, amount=0, message="", gas_fee=1)
         e.sign_tx(priv)
         with pytest.raises(ValidationError, match="not a known post"):
-            validate_transaction_state(e, chain.state, chain.known_posts)
+            validate_transaction_state(e, chain.state, chain.post_authors)
 
     def test_transfer_insufficient(self):
         chain, priv, pub = make_chain()
@@ -182,7 +182,7 @@ class TestStateValidation:
         tx = Transfer(sender=pub, recipient=r, amount=9999, nonce=0, gas_fee=1)
         tx.sign_tx(priv)
         with pytest.raises(ValidationError, match="insufficient"):
-            validate_transaction_state(tx, chain.state, chain.known_posts)
+            validate_transaction_state(tx, chain.state, chain.post_authors)
 
     def test_nonexistent_sender(self):
         chain, _, _ = make_chain()
@@ -191,7 +191,7 @@ class TestStateValidation:
         tx = Transfer(sender=pub2, recipient=r, amount=1, nonce=0, gas_fee=1)
         tx.sign_tx(priv2)
         with pytest.raises(ValidationError, match="does not exist"):
-            validate_transaction_state(tx, chain.state, chain.known_posts)
+            validate_transaction_state(tx, chain.state, chain.post_authors)
 
 
 # -- Block validation --

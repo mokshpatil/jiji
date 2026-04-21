@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from jiji.core.block import Block
-from jiji.core.config import MAX_MEMPOOL_SIZE, RBF_MIN_BUMP_BPS
+from jiji.core.config import HARDFORK_HEIGHT, MAX_MEMPOOL_SIZE, RBF_MIN_BUMP_BPS
 from jiji.core.serialization import canonicalize
 from jiji.core.transaction import Coinbase, Post, Endorse, Transfer, Transaction
 from jiji.core.validation import (
@@ -98,12 +98,26 @@ class Mempool:
         if replaced_hash is not None:
             del self._txs[replaced_hash]
 
-        # nonce matches — validate against chain state or accept as sequential pending
+        # nonce matches — validate against chain state or accept as sequential pending.
+        # Height used for hard-fork gating is chain.height + 1 (the soonest a
+        # new tx could land), which is also the height the self-endorse ban
+        # keys off of.
+        next_height = self._chain.height + 1
         if pubkey is not None and pubkey in self._pending_nonces:
-            # skip full state validation (on-chain nonce would mismatch)
-            pass
+            # Skip full state validation (on-chain nonce would mismatch), but
+            # still enforce rules that don't depend on account state — most
+            # importantly the self-endorse ban, which otherwise lets a bad tx
+            # sit in the mempool and jam the miner.
+            if isinstance(tx, Endorse):
+                target_author = self._chain.post_authors.get(tx.target)
+                if target_author is None:
+                    raise ValidationError("endorsement target is not a known post")
+                if next_height >= HARDFORK_HEIGHT and target_author == tx.author:
+                    raise ValidationError("self-endorsement not allowed")
         else:
-            validate_transaction_state(tx, self._chain.state, self._chain.known_posts)
+            validate_transaction_state(
+                tx, self._chain.state, self._chain.post_authors, next_height,
+            )
 
         self._insert(tx, pubkey)
 
@@ -189,9 +203,12 @@ class Mempool:
     def revalidate(self) -> list[bytes]:
         """Purge transactions no longer valid against current state. Returns removed hashes."""
         removed = []
+        next_height = self._chain.height + 1
         for tx_hash, tx in list(self._txs.items()):
             try:
-                validate_transaction_state(tx, self._chain.state, self._chain.known_posts)
+                validate_transaction_state(
+                    tx, self._chain.state, self._chain.post_authors, next_height,
+                )
             except ValidationError:
                 del self._txs[tx_hash]
                 removed.append(tx_hash)

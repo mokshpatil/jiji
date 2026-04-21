@@ -122,13 +122,19 @@ def validate_transaction_format(tx: Transaction, expected_height: int = 0) -> No
 def validate_transaction_state(
     tx: Transaction,
     state: WorldState,
-    known_posts: set[bytes],
+    post_authors: dict[bytes, bytes],
+    height: int = 0,
 ) -> None:
-    """Validate a transaction against the current world state."""
+    """Validate a transaction against the current world state.
+
+    `post_authors` maps post tx_hash → author pubkey. `height` is the block
+    height this tx would land in, used to gate hard-fork rules (e.g.
+    self-endorsement ban).
+    """
     if isinstance(tx, Post):
-        _validate_post_state(tx, state, known_posts)
+        _validate_post_state(tx, state, post_authors)
     elif isinstance(tx, Endorse):
-        _validate_endorse_state(tx, state, known_posts)
+        _validate_endorse_state(tx, state, post_authors, height)
     elif isinstance(tx, Transfer):
         _validate_transfer_state(tx, state)
     elif isinstance(tx, Coinbase):
@@ -136,7 +142,7 @@ def validate_transaction_state(
 
 
 def _validate_post_state(
-    tx: Post, state: WorldState, known_posts: set[bytes]
+    tx: Post, state: WorldState, post_authors: dict[bytes, bytes]
 ) -> None:
     account = state.get_account(tx.author)
     if account is None:
@@ -147,12 +153,12 @@ def _validate_post_state(
         )
     if account.balance < tx.gas_fee:
         raise ValidationError("insufficient balance for gas fee")
-    if tx.reply_to is not None and tx.reply_to not in known_posts:
+    if tx.reply_to is not None and tx.reply_to not in post_authors:
         raise ValidationError("reply_to references unknown post")
 
 
 def _validate_endorse_state(
-    tx: Endorse, state: WorldState, known_posts: set[bytes]
+    tx: Endorse, state: WorldState, post_authors: dict[bytes, bytes], height: int
 ) -> None:
     account = state.get_account(tx.author)
     if account is None:
@@ -164,8 +170,12 @@ def _validate_endorse_state(
     total_cost = tx.gas_fee + tx.amount
     if account.balance < total_cost:
         raise ValidationError("insufficient balance for gas + tip")
-    if tx.target not in known_posts:
+    target_author = post_authors.get(tx.target)
+    if target_author is None:
         raise ValidationError("endorsement target is not a known post")
+    # Hard-fork rule: can't endorse your own post.
+    if height >= HARDFORK_HEIGHT and target_author == tx.author:
+        raise ValidationError("self-endorsement not allowed")
 
 
 def _validate_transfer_state(tx: Transfer, state: WorldState) -> None:
@@ -338,7 +348,6 @@ def validate_block(block: Block, chain: Blockchain, current_time: int) -> None:
 
     # Validate and apply each transaction on a working state copy
     working_state = chain.state.copy()
-    working_posts = set(chain.known_posts)
     working_authors = dict(chain.post_authors)
     seen_hashes: set[bytes] = set()
 
@@ -353,28 +362,21 @@ def validate_block(block: Block, chain: Blockchain, current_time: int) -> None:
         # Format validation
         validate_transaction_format(tx, header.height)
 
-        # State validation (skip coinbase, already checked)
+        # State validation (skip coinbase, already checked). Runs the
+        # self-endorsement hard-fork rule via `height`.
         if not isinstance(tx, Coinbase):
-            validate_transaction_state(tx, working_state, working_posts)
+            validate_transaction_state(tx, working_state, working_authors, header.height)
 
         # Resolve target author for endorsement tips
         target_author = None
-        if isinstance(tx, Endorse):
-            resolved = working_authors.get(tx.target)
-            # Hard-fork rule: a user cannot endorse their own post. This closes
-            # a cheap self-cycle that drained gas to no social signal.
-            if (header.height >= HARDFORK_HEIGHT
-                    and resolved is not None and resolved == tx.author):
-                raise ValidationError("self-endorsement not allowed")
-            if tx.amount > 0:
-                target_author = resolved
+        if isinstance(tx, Endorse) and tx.amount > 0:
+            target_author = working_authors.get(tx.target)
 
         # Apply to working state
         working_state.apply_transaction(tx, header.miner, target_author)
 
         # Track new posts for intra-block reply/endorse references
         if isinstance(tx, Post):
-            working_posts.add(tx_h)
             working_authors[tx_h] = tx.author
 
     # Merkle root verification
