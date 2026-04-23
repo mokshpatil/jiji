@@ -221,7 +221,9 @@ def cmd_viewblocks(args: argparse.Namespace) -> None:
             elif tx_type == "transfer":
                 print(f"  [transfer] sender={tx['sender'][:16]}...  recipient={tx['recipient'][:16]}...  amount={tx['amount']}")
             elif tx_type == "endorse":
-                print(f"  [endorse]  sender={tx['sender'][:16]}...  target={tx['target'][:16]}...")
+                tip = f"  tip={tx['amount']}" if tx.get("amount") else ""
+                msg = f"  msg={tx['message']!r}" if tx.get("message") else ""
+                print(f"  [endorse]  author={tx['author'][:16]}...  target={tx['target'][:16]}...{tip}{msg}")
             else:
                 print(f"  [{tx_type}] {tx}")
         print()
