@@ -110,6 +110,13 @@ class Node:
             if addr not in [(h, p) for h, p in self._bootstrap_peers]:
                 asyncio.create_task(self.p2p.connect_to_peer(*addr))
 
+        # Flip _running BEFORE scheduling background tasks. Any `await` after
+        # create_task() yields control to the loop; if _running were still
+        # False, the freshly-scheduled task would see a False flag and exit
+        # its `while self._running:` loop immediately (seen in practice with
+        # --lan, where mDNS start() awaits and starved the mining loop).
+        self._running = True
+
         asyncio.create_task(self.p2p.peer_exchange_loop())
 
         if self._mine:
@@ -124,7 +131,6 @@ class Node:
                 logger.warning(f"mDNS discovery failed to start: {e}")
                 self._discovery = None
 
-        self._running = True
         logger.info("node started")
 
     async def stop(self) -> None:

@@ -21,13 +21,41 @@ No build step. Just serve the directory.
 
 ## Run
 
-From this directory:
+**Same machine only** (simplest):
 
 ```
 python3 -m http.server 8080
 ```
 
-Open http://127.0.0.1:8080 in your browser.
+Open http://127.0.0.1:8080.
+
+**Multiple devices on the LAN**: you need HTTPS. The web client signs
+transactions with WebCrypto, which browsers only expose in secure contexts
+(HTTPS, or `http://localhost`). From a second device over plain HTTP on a LAN
+IP, `crypto.subtle` is `undefined` and signing fails.
+
+Use the bundled HTTPS server:
+
+```
+python3 serve.py                    # https on 0.0.0.0:8443
+python3 serve.py --port 8443 \
+    --host my-laptop.local \
+    --host 192.168.1.42             # add extra SANs if needed
+```
+
+On first run it generates a cert in `.certs/` (gitignore'd). If `mkcert` is
+installed (`brew install mkcert && mkcert -install` once), the cert is
+locally-trusted and browsers won't warn. Otherwise it falls back to a
+self-signed cert via `openssl` — every browser shows a warning on first
+visit; click **Advanced → Proceed** once per device and you're done.
+
+The server prints something like:
+
+```
+  jiji client served at:
+    https://localhost:8443
+    https://10.30.11.161:8443   (other devices on your LAN)
+```
 
 ## First-time setup
 

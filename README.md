@@ -29,7 +29,9 @@ jiji keygen --keyfile ~/.jiji/key
 jiji node --lan --mine --keyfile ~/.jiji/key --data-dir ~/.jiji/data
 
 # In another terminal, serve the reference web client.
-cd frontend && python3 -m http.server 8080
+# Same machine only: python3 -m http.server 8080
+# Multi-device over LAN (WebCrypto requires HTTPS): python3 serve.py
+cd frontend && python3 serve.py
 ```
 
 Open `http://127.0.0.1:8080`, create/import a wallet in the browser, and

@@ -57,7 +57,7 @@ def parse_peers(peers_str: str) -> list[tuple[str, int]]:
 # RPC helper
 # ---------------------------------------------------------------------------
 
-def rpc_call(rpc_url: str, method: str, params: dict) -> dict:
+def rpc_call(rpc_url: str, method: str, params: dict, token: str | None = None) -> dict:
     """Call a JSON-RPC method and return the result dict."""
     body = json.dumps({
         "jsonrpc": "2.0",
@@ -65,12 +65,10 @@ def rpc_call(rpc_url: str, method: str, params: dict) -> dict:
         "params": params,
         "id": 1,
     }).encode()
-    req = urllib.request.Request(
-        rpc_url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(rpc_url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
@@ -82,6 +80,29 @@ def rpc_call(rpc_url: str, method: str, params: dict) -> dict:
         print(f"RPC error: {result['error']}", file=sys.stderr)
         sys.exit(1)
     return result.get("result", {})
+
+
+def _cli_rpc_token(args: argparse.Namespace) -> str | None:
+    """Resolve a bearer token for CLI RPC calls.
+
+    Precedence:
+      1. explicit ``--rpc-token``
+      2. ``$JIJI_RPC_TOKEN``
+      3. ``<--data-dir>/rpc_token`` (or ``~/.jiji/data/rpc_token`` as a fallback
+         for the quickstart layout)
+    """
+    tok = getattr(args, "rpc_token", None)
+    if tok:
+        return tok.strip()
+    env_tok = os.environ.get("JIJI_RPC_TOKEN")
+    if env_tok:
+        return env_tok.strip()
+    data_dir = getattr(args, "data_dir", None) or os.path.expanduser("~/.jiji/data")
+    path = os.path.join(data_dir, "rpc_token")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return f.read().strip()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +137,10 @@ def cmd_keygen(args: argparse.Namespace) -> None:
 def cmd_account(args: argparse.Namespace) -> None:
     """Query an account's balance and nonce."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
+    token = _cli_rpc_token(args)
     _, pub = load_or_generate_keypair(args.keyfile)
     pubkey_hex = pub.hex()
-    result = rpc_call(rpc_url, "get_account", {"pubkey": pubkey_hex})
+    result = rpc_call(rpc_url, "get_account", {"pubkey": pubkey_hex}, token=token)
     if result.get("exists"):
         print(f"pubkey:  {pubkey_hex}")
         print(f"balance: {result['balance']}")
@@ -131,10 +153,11 @@ def cmd_account(args: argparse.Namespace) -> None:
 def cmd_post(args: argparse.Namespace) -> None:
     """Submit a post transaction."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
+    token = _cli_rpc_token(args)
     priv, pub = load_or_generate_keypair(args.keyfile)
 
     # Get next nonce (accounts for pending txs in mempool)
-    result = rpc_call(rpc_url, "get_next_nonce", {"pubkey": pub.hex()})
+    result = rpc_call(rpc_url, "get_next_nonce", {"pubkey": pub.hex()}, token=token)
     nonce = result.get("nonce", 0)
 
     tx = Post(
@@ -147,17 +170,18 @@ def cmd_post(args: argparse.Namespace) -> None:
     )
     tx.sign_tx(priv)
 
-    result = rpc_call(rpc_url, "submit_transaction", {"transaction": tx.to_dict()})
+    result = rpc_call(rpc_url, "submit_transaction", {"transaction": tx.to_dict()}, token=token)
     print(f"submitted: {result.get('tx_hash', '')}")
 
 
 def cmd_transfer(args: argparse.Namespace) -> None:
     """Submit a transfer transaction."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
+    token = _cli_rpc_token(args)
     priv, pub = load_or_generate_keypair(args.keyfile)
 
     # Get next nonce (accounts for pending txs in mempool)
-    result = rpc_call(rpc_url, "get_next_nonce", {"pubkey": pub.hex()})
+    result = rpc_call(rpc_url, "get_next_nonce", {"pubkey": pub.hex()}, token=token)
     nonce = result.get("nonce", 0)
 
     tx = Transfer(
@@ -169,21 +193,22 @@ def cmd_transfer(args: argparse.Namespace) -> None:
     )
     tx.sign_tx(priv)
 
-    result = rpc_call(rpc_url, "submit_transaction", {"transaction": tx.to_dict()})
+    result = rpc_call(rpc_url, "submit_transaction", {"transaction": tx.to_dict()}, token=token)
     print(f"submitted: {result.get('tx_hash', '')}")
 
 
 def cmd_viewblocks(args: argparse.Namespace) -> None:
     """Display N blocks starting from a given height (default: latest)."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
-    tip = rpc_call(rpc_url, "get_latest_block", {})
+    token = _cli_rpc_token(args)
+    tip = rpc_call(rpc_url, "get_latest_block", {}, token=token)
     tip_height = tip["header"]["height"]
 
     top = args.start if args.start is not None else tip_height
     top = min(top, tip_height)
     bottom = max(0, top - args.n + 1)
     for height in range(top, bottom - 1, -1):
-        block = rpc_call(rpc_url, "get_block", {"height": height})
+        block = rpc_call(rpc_url, "get_block", {"height": height}, token=token)
         h = block["header"]
         print(f"Block #{h['height']}  miner={h['miner'][:16]}...  time={h['timestamp']}  txs={h['tx_count']}")
         print(f"Difficulty: {h['difficulty']}")
@@ -205,8 +230,9 @@ def cmd_viewblocks(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     """Show node status."""
     rpc_url = f"http://{args.rpc_host}:{args.rpc_port}"
-    info = rpc_call(rpc_url, "get_node_info", {})
-    tip = rpc_call(rpc_url, "get_latest_block", {})
+    token = _cli_rpc_token(args)
+    info = rpc_call(rpc_url, "get_node_info", {}, token=token)
+    tip = rpc_call(rpc_url, "get_latest_block", {}, token=token)
     print(f"height:       {info.get('height', 'n/a')}")
     print(f"peers:        {info.get('peer_count', 0)}")
     print(f"mempool:      {info.get('mempool_size', 0)} txs")
@@ -336,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
     rpc_flags.add_argument("--rpc-port", type=int, default=DEFAULT_RPC_PORT, metavar="PORT")
     rpc_flags.add_argument("--keyfile", default=None, metavar="FILE",
                            help="Private key file (hex)")
+    rpc_flags.add_argument("--rpc-token", default=None, metavar="TOKEN",
+                           help="Bearer token for RPC auth. Overrides "
+                                "$JIJI_RPC_TOKEN and <data-dir>/rpc_token.")
+    rpc_flags.add_argument("--data-dir", default=None, metavar="DIR",
+                           help="Node data dir; used to auto-load the bearer "
+                                "token from <data-dir>/rpc_token.")
 
     subparsers = parser.add_subparsers(dest="command")
 
