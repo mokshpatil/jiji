@@ -16,11 +16,19 @@ jiji node \
 
 bob also mines
 jiji node \
-  --mine
+  --mine \
   --keyfile /tmp/bob.key \
   --data-dir /tmp/jiji-bob \
   --port 9335 --rpc-port 9334 \
   --peers 127.0.0.1:9333
+
+send money from miner
+jiji transfer \
+  --keyfile /tmp/bob.key \
+  --data-dir /tmp/jiji-miner \
+  0deb8c91e4a7c3bb1f044facab09a066e82f79ef27e6d119c806d9ff9f6602bd 300
+
+
 
 run server
 cd frontend
