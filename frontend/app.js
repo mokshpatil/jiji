@@ -94,8 +94,8 @@ function showLockScreen() {
         showOnly("unlock-panel", "unlock-panel", "create-panel", "import-panel");
         $("unlock-pass").focus();
     } else {
-        showOnly("create-panel", "unlock-panel", "create-panel", "import-panel");
-        $("create-pass").focus();
+        showOnly("import-panel", "unlock-panel", "create-panel", "import-panel");
+        $("import-hex").focus();
     }
 }
 
@@ -235,12 +235,6 @@ async function enterApp() {
     await refresh();
     if (state.refreshTimer) clearInterval(state.refreshTimer);
     state.refreshTimer = setInterval(() => { refresh().catch(() => {}); }, 15000);
-}
-
-function lockApp() {
-    state.keypair = null;
-    if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
-    showLockScreen();
 }
 
 function switchView(view) {
@@ -602,14 +596,19 @@ function init() {
         showOnly("import-panel", "unlock-panel", "create-panel", "import-panel");
         $("import-hex").focus();
     });
+    $("show-create-from-import").addEventListener("click", () => {
+        showOnly("create-panel", "unlock-panel", "create-panel", "import-panel");
+        $("create-pass").focus();
+    });
     $("back-from-create").addEventListener("click", () => {
         const hasWallet = !!localStorage.getItem(LS_WALLET);
-        showOnly(hasWallet ? "unlock-panel" : "create-panel",
+        showOnly(hasWallet ? "unlock-panel" : "import-panel",
                  "unlock-panel", "create-panel", "import-panel");
+        if (!hasWallet) $("import-hex").focus();
     });
     $("back-from-import").addEventListener("click", () => {
         const hasWallet = !!localStorage.getItem(LS_WALLET);
-        showOnly(hasWallet ? "unlock-panel" : "create-panel",
+        showOnly(hasWallet ? "unlock-panel" : "import-panel",
                  "unlock-panel", "create-panel", "import-panel");
     });
     $("wipe-btn").addEventListener("click", handleWipe);
@@ -638,7 +637,6 @@ function init() {
     $("change-node").addEventListener("click", showNodeScreen);
     $("export-key").addEventListener("click", handleExport);
     $("copy-priv").addEventListener("click", () => copyToClipboard($("export-hex").textContent));
-    $("lock-wallet").addEventListener("click", lockApp);
     $("delete-wallet").addEventListener("click", handleWipe);
 
     // Kick off
