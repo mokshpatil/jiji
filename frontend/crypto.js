@@ -138,7 +138,7 @@ export async function sha256Hex(bytes) {
 
 // -- Passphrase encryption (PBKDF2 → AES-GCM) --------------------------------
 
-const PBKDF2_ITERS = 200_000;
+const PBKDF2_ITERS = 1_000;
 
 async function deriveWrapKey(passphrase, salt) {
     const base = await crypto.subtle.importKey(
