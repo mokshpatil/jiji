@@ -61,13 +61,10 @@
 <div id="node-screen" class="overlay hidden">
     <div class="card">
         <h1>Connect to a node</h1>
-        <p class="hint">Point jiji at a running node. If you used <code>--lan</code>, the bearer
-        token was printed when the node started, or saved to
-        <code>&lt;data-dir&gt;/rpc_token</code>.</p>
+        <p class="hint">Point jiji at a running node. Default is the local
+        node at <code>http://127.0.0.1:9332</code>.</p>
         <label>RPC URL</label>
         <input type="text" id="node-url" placeholder="http://127.0.0.1:9332" spellcheck="false">
-        <label>Bearer token <span class="hint-inline">(leave blank if node has no auth)</span></label>
-        <input type="text" id="node-token" placeholder="hex token, optional" spellcheck="false">
         <button id="node-connect">Connect</button>
         <p id="node-error" class="err"></p>
     </div>

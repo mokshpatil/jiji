@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import time
@@ -22,9 +21,8 @@ logger = logging.getLogger(__name__)
 class RPCServer:
     """Minimal async HTTP server implementing JSON-RPC 2.0.
 
-    When `auth_token` is set, requests must carry a matching
-    `Authorization: Bearer <token>` header. When `allow_origin` is set,
-    CORS headers are emitted and `OPTIONS` preflight requests return 204.
+    When `allow_origin` is set, CORS headers are emitted and `OPTIONS`
+    preflight requests return 204.
     """
 
     def __init__(
@@ -32,7 +30,6 @@ class RPCServer:
         node: Node,
         host: str = "127.0.0.1",
         port: int = DEFAULT_RPC_PORT,
-        auth_token: str | None = None,
         allow_origin: str | None = None,
         rate_limit: bool = True,
         trusted_cidrs: tuple[str, ...] = (),
@@ -40,7 +37,6 @@ class RPCServer:
         self.node = node
         self.host = host
         self.port = port
-        self.auth_token = auth_token
         self.allow_origin = allow_origin
         self.rate_limit = rate_limit
         self._trusted = [ip_network(c, strict=False) for c in trusted_cidrs]
@@ -102,7 +98,7 @@ class RPCServer:
             request_line = header_lines[0] if header_lines else ""
             method_verb = request_line.split(" ", 1)[0].upper() if request_line else ""
 
-            # CORS preflight short-circuit — no auth or rate limit on OPTIONS.
+            # CORS preflight short-circuit — no rate limit on OPTIONS.
             if method_verb == "OPTIONS":
                 await self._send_preflight(writer)
                 return
@@ -115,7 +111,6 @@ class RPCServer:
                 )
                 return
 
-            auth_header = ""
             content_length = 0
             for line in header_lines:
                 lower = line.lower()
@@ -124,18 +119,6 @@ class RPCServer:
                         content_length = int(line.split(":", 1)[1].strip())
                     except ValueError:
                         content_length = 0
-                elif lower.startswith("authorization:"):
-                    auth_header = line.split(":", 1)[1].strip()
-
-            if self.auth_token is not None:
-                expected = f"Bearer {self.auth_token}"
-                if not _constant_time_equals(auth_header, expected):
-                    await self._send_http(
-                        writer,
-                        self._error_response(None, -32001, "Unauthorized"),
-                        status_code=401,
-                    )
-                    return
 
             # read remaining body
             body = body_start
@@ -195,7 +178,7 @@ class RPCServer:
         return [
             b"Access-Control-Allow-Origin: " + origin + b"\r\n",
             b"Access-Control-Allow-Methods: POST, OPTIONS\r\n",
-            b"Access-Control-Allow-Headers: Authorization, Content-Type\r\n",
+            b"Access-Control-Allow-Headers: Content-Type\r\n",
             b"Access-Control-Max-Age: 600\r\n",
         ]
 
@@ -312,14 +295,9 @@ class RPCServer:
 _HTTP_REASONS = {
     200: "OK",
     204: "No Content",
-    401: "Unauthorized",
     429: "Too Many Requests",
 }
 
 
 def _http_reason(status: int) -> str:
     return _HTTP_REASONS.get(status, "OK")
-
-
-def _constant_time_equals(a: str, b: str) -> bool:
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))

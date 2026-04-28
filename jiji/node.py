@@ -41,7 +41,6 @@ class Node:
         rpc_port: int = DEFAULT_RPC_PORT,
         mine: bool = False,
         bootstrap_peers: list[tuple[str, int]] | None = None,
-        rpc_auth_token: str | None = None,
         rpc_allow_origin: str | None = None,
         mdns: bool = False,
         rate_limit: bool = True,
@@ -66,7 +65,6 @@ class Node:
         )
         self.rpc = RPCServer(
             self, rpc_host, rpc_port,
-            auth_token=rpc_auth_token,
             allow_origin=rpc_allow_origin,
             rate_limit=rate_limit,
             trusted_cidrs=trusted_cidrs,

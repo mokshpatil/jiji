@@ -16,7 +16,7 @@ import { PostCache, syncFeed, MAX_FEED_DEPTH } from "./cache.js";
 // -- Persistence keys --------------------------------------------------------
 
 const LS_WALLET = "jiji.wallet";      // encrypted keypair blob + publicHex
-const LS_NODE   = "jiji.node";        // {url, token}
+const LS_NODE   = "jiji.node";        // {url}
 
 // -- State -------------------------------------------------------------------
 
@@ -175,8 +175,8 @@ async function postUnlock() {
     const nodeCfg = localStorage.getItem(LS_NODE);
     if (nodeCfg) {
         try {
-            const { url, token } = JSON.parse(nodeCfg);
-            const rpc = new RpcClient({ url, token });
+            const { url } = JSON.parse(nodeCfg);
+            const rpc = new RpcClient({ url });
             await rpc.getNodeInfo();  // probe
             state.rpc = rpc;
             await enterApp();
@@ -197,9 +197,8 @@ function showNodeScreen() {
     const saved = localStorage.getItem(LS_NODE);
     if (saved) {
         try {
-            const { url, token } = JSON.parse(saved);
+            const { url } = JSON.parse(saved);
             $("node-url").value = url || "";
-            $("node-token").value = token || "";
         } catch {}
     } else {
         $("node-url").value = $("node-url").value || "http://127.0.0.1:9332";
@@ -210,16 +209,15 @@ function showNodeScreen() {
 async function handleNodeConnect() {
     setErr("node-error", "");
     const url = $("node-url").value.trim();
-    const token = $("node-token").value.trim();
     if (!url) { setErr("node-error", "RPC URL required"); return; }
-    const rpc = new RpcClient({ url, token });
+    const rpc = new RpcClient({ url });
     try {
         await rpc.getNodeInfo();
     } catch (e) {
         setErr("node-error", "could not reach node: " + e.message);
         return;
     }
-    localStorage.setItem(LS_NODE, JSON.stringify({ url, token }));
+    localStorage.setItem(LS_NODE, JSON.stringify({ url }));
     state.rpc = rpc;
     await enterApp();
 }
@@ -616,7 +614,6 @@ function init() {
     // Node screen
     $("node-connect").addEventListener("click", handleNodeConnect);
     $("node-url").addEventListener("keydown", (e) => { if (e.key === "Enter") handleNodeConnect(); });
-    $("node-token").addEventListener("keydown", (e) => { if (e.key === "Enter") handleNodeConnect(); });
 
     // Tabs
     for (const tab of document.querySelectorAll(".tab")) {

@@ -22,8 +22,7 @@ applications that anyone can build.
 
 ```bash
 # Generate a key and launch a mining node accessible on your LAN.
-# --lan binds RPC to 0.0.0.0, auto-generates a bearer token at
-# <data-dir>/rpc_token, sets CORS allow-origin=*, and enables mDNS
+# --lan binds RPC to 0.0.0.0, sets CORS allow-origin=*, and enables mDNS
 # peer discovery.
 jiji keygen --keyfile ~/.jiji/key
 jiji node --lan --mine --keyfile ~/.jiji/key --data-dir ~/.jiji/data
@@ -35,7 +34,7 @@ cd frontend && python3 serve.py
 ```
 
 Open `http://127.0.0.1:8080`, create/import a wallet in the browser, and
-paste the RPC URL + bearer token from the node. See [`frontend/README.md`](frontend/README.md)
+paste the RPC URL (e.g. `http://127.0.0.1:9332`). See [`frontend/README.md`](frontend/README.md)
 for details.
 
 ---
@@ -602,12 +601,13 @@ None of this affects the protocol.
 - **Escape hatches** for trusted networks: `--no-rate-limit`,
   `--trust-ip <CIDR>`.
 
-### RPC Authentication
-- When the RPC binds to anything other than loopback, a bearer token is
-  required on every request (`Authorization: Bearer <hex>`).
-- `--lan` auto-generates a 32-byte token, persists it to
-  `<data-dir>/rpc_token`, and sets `Access-Control-Allow-Origin: *` so the
-  reference web client can call the node directly from a browser.
+### RPC Exposure
+- The RPC has no authentication. When the RPC binds to anything other than
+  loopback (e.g. with `--lan`), anyone on the same network can call it. The
+  rate limiter is the only line of defense against abuse — keep the node on
+  trusted networks, or front it with a reverse proxy that enforces auth.
+- `--lan` sets `Access-Control-Allow-Origin: *` so the reference web client
+  can call the node directly from a browser.
 
 ### Transaction Replay
 - Nonce field prevents replay: each transaction from an account has a unique

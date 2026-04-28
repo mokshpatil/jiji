@@ -13,8 +13,7 @@ No build step. Just serve the directory.
   jiji node --lan --mine --keyfile ~/.jiji/key
   ```
 
-  Note the bearer token printed on startup (also saved to
-  `<data-dir>/rpc_token`). The RPC is at `http://<lan-ip>:9332`.
+  The RPC is at `http://<lan-ip>:9332`.
 
 - A modern browser: Chrome 113+, Firefox 130+, or Safari 17+ (WebCrypto Ed25519
   is required).
@@ -63,8 +62,8 @@ The server prints something like:
    encrypts the private key with your passphrase (PBKDF2 → AES-GCM). The
    encrypted blob lives in `localStorage`. The private key is never sent to
    the node.
-2. **Connect to a node.** Enter the RPC URL and bearer token from the
-   `jiji node --lan` startup output.
+2. **Connect to a node.** Enter the RPC URL from the `jiji node --lan`
+   startup output (e.g. `http://127.0.0.1:9332`).
 3. **Fund the wallet.** A brand-new key has zero balance. Either mine to it
    (`--keyfile` on the node points at this key) or receive a transfer from
    another account before posting.
@@ -92,6 +91,6 @@ freeze the browser:
 | Thing                | Where                      |
 | -------------------- | -------------------------- |
 | Encrypted key blob   | `localStorage["jiji.wallet"]` |
-| Node URL + token     | `localStorage["jiji.node"]`   |
+| Node URL             | `localStorage["jiji.node"]`   |
 | Posts / endorsements | IndexedDB `jiji-cache`        |
 | Private key in-mem   | cleared on lock / tab close   |

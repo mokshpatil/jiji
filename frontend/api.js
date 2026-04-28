@@ -1,4 +1,4 @@
-// JSON-RPC 2.0 client for a jiji node. Bearer-auth optional.
+// JSON-RPC 2.0 client for a jiji node.
 
 export class RpcError extends Error {
     constructor(code, message) {
@@ -8,14 +8,12 @@ export class RpcError extends Error {
 }
 
 export class RpcClient {
-    constructor({ url, token }) {
+    constructor({ url }) {
         this.url = url.replace(/\/+$/, "");
-        this.token = token || "";
     }
 
     async call(method, params = {}) {
         const headers = { "Content-Type": "application/json" };
-        if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
         const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
         let resp;
         try {
@@ -23,7 +21,6 @@ export class RpcClient {
         } catch (e) {
             throw new Error(`network error: ${e.message}`);
         }
-        if (resp.status === 401) throw new Error("unauthorized (bad RPC token)");
         if (resp.status === 429) throw new Error("rate limited — slow down");
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         let data;
